@@ -250,15 +250,14 @@ struct TxinCLI {
         print("分片 \(playlist.segments.count)  加密 \(playlist.key != nil ? playlist.key!.method : "无")  IV \(playlist.key?.iv.map { TxinCrypto.bytesToHex($0) } ?? "-")")
 
         let dir = URL(fileURLWithPath: outDir).appendingPathComponent(id)
-        var lastPct = -1
+        // 进度直接打：onProgress 是 @Sendable 闭包，不能捕获并修改外部 var（Swift 6 并发检查）
+        // 用 \r 覆盖同一行，重复打印同一百分比也无害
         let merged = try await dl.download(playlist, to: dir, referer: TxinClient.defaultHost + "/",
             onProgress: { p in
                 let pct = Int(p.fraction * 100)
-                if pct != lastPct {
-                    lastPct = pct
-                    let mb = Double(p.bytes) / 1_048_576
-                    FileHandle.standardError.write(Data("\r下载 \(p.done)/\(p.total)  \(pct)%  \(String(format: "%.1f", mb)) MB".utf8))
-                }
+                let mb = Double(p.bytes) / 1_048_576
+                FileHandle.standardError.write(
+                    Data("\r下载 \(p.done)/\(p.total)  \(pct)%  \(String(format: "%.1f", mb)) MB".utf8))
             },
             onState: { s in
                 FileHandle.standardError.write(Data("\r\(s)                                \n".utf8))
