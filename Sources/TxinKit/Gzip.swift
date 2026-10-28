@@ -6,6 +6,10 @@
 //  而协议要求 gzip 容器（RFC 1952）。这里自己做 header / trailer / CRC32，
 //  中间那段直接交给 compression_stream。
 //
+//  注意两个编译器会挑刺的点（已踩过）：
+//    · compression_stream 不能无参构造，memberwise init 六个参数全要
+//    · stream.src_ptr 是 UnsafePointer<UInt8>，可变指针不能直接赋给它
+//
 
 import Foundation
 import Compression
@@ -57,37 +61,57 @@ public enum TxinGzip {
 
     private static func perform(_ op: compression_stream_operation,
                                 on input: [UInt8]) throws -> [UInt8] {
-        var stream = compression_stream()
-        var status = compression_stream_init(&stream, op, COMPRESSION_ZLIB)
-        guard status == COMPRESSION_STATUS_OK else {
-            throw TxinGzipError.streamInitFailed(Int32(status.rawValue))
-        }
-        defer { compression_stream_destroy(&stream) }
 
-        var output = [UInt8]()
-        output.reserveCapacity(max(input.count * 2, 1024))
+        let dstCapacity = max(chunkSize, 1024)
+        let dstBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: dstCapacity)
+        defer { dstBuffer.deallocate() }
 
-        let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: chunkSize)
-        defer { dst.deallocate() }
+        // compression_stream 的 src_ptr 不能是 nil，空输入塞一个占位字节
+        var srcWork = input
+        if srcWork.isEmpty { srcWork = [0] }
 
-        return try input.withUnsafeBufferPointer { src -> [UInt8] in
-            // 空输入也要走一遍 finalize
-            stream.src_ptr = src.baseAddress ?? dst
-            stream.src_size = src.count
+        return try srcWork.withUnsafeBufferPointer { src -> [UInt8] in
+            guard let srcBase = src.baseAddress else { return [] }
+
+            // 必须显式给全部参数：Swift 不再为这个 C struct 生成无参 init
+            var stream = compression_stream(
+                dst_ptr: dstBuffer,
+                dst_size: 0,
+                src_ptr: srcBase,
+                src_size: 0,
+                state: nil
+            )
+
+            var status = compression_stream_init(&stream, op, COMPRESSION_ZLIB)
+            guard status == COMPRESSION_STATUS_OK else {
+                throw TxinGzipError.streamInitFailed(Int32(status.rawValue))
+            }
+            defer { compression_stream_destroy(&stream) }
+
+            stream.src_ptr = srcBase          // 已是 UnsafePointer<UInt8>
+            stream.src_size = input.count
+
+            var output = [UInt8]()
+            output.reserveCapacity(max(input.count * 2, 1024))
+
             repeat {
-                stream.dst_ptr = dst
-                stream.dst_size = chunkSize
-                status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                stream.dst_ptr = dstBuffer
+                stream.dst_size = dstCapacity
+                status = compression_stream_process(
+                    &stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+
                 switch status {
                 case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
-                    let produced = chunkSize - stream.dst_size
+                    let produced = dstCapacity - stream.dst_size
                     if produced > 0 {
-                        output.append(contentsOf: UnsafeBufferPointer(start: dst, count: produced))
+                        output.append(contentsOf:
+                            UnsafeBufferPointer(start: dstBuffer, count: produced))
                     }
                 default:
                     throw TxinGzipError.streamProcessFailed(Int32(status.rawValue))
                 }
             } while status == COMPRESSION_STATUS_OK
+
             return output
         }
     }
