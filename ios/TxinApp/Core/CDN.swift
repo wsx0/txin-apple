@@ -10,6 +10,10 @@
 //  所有请求返回同一个 11545 字节 HTML 拦截页。所以默认改写走 CloudFront，
 //  并在启动时探测一次，选真正能出数据的那个。
 //
+//  并发说明：原来的 `static var activeMirrors` 是可变的全局共享状态，
+//  Swift 6 的严格并发检查会直接判它不合法。这里收进一个带锁的
+//  @unchecked Sendable 单例里，读写都上锁。
+//
 
 import Foundation
 
@@ -23,13 +27,39 @@ public enum TxinCDN {
     public static let primaryHost = "whk.srslpoh.cn"
     public static let fallbackHost = "d22i72z1otaemb.cloudfront.net"
 
+    // MARK: - 可变状态（带锁）
+
+    final class State: @unchecked Sendable {
+        static let shared = State()
+        private let lock = NSLock()
+        private var value: [(from: String, to: String)] = TxinCDN.mirrors
+
+        var mirrors: [(from: String, to: String)] {
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return value
+            }
+            set {
+                lock.lock()
+                defer { lock.unlock() }
+                value = newValue
+            }
+        }
+    }
+
     /// 当前生效的替换规则（探测后可能清空）
-    public static var activeMirrors: [(from: String, to: String)] = mirrors
+    public static var activeMirrors: [(from: String, to: String)] {
+        get { State.shared.mirrors }
+        set { State.shared.mirrors = newValue }
+    }
+
+    // MARK: - 改写
 
     public static func rewrite(_ url: String?) -> String? {
         guard let url, !url.isEmpty else { return nil }
         var out = url
-        for m in activeMirrors where out.hasPrefix(m.from) {
+        for m in State.shared.mirrors where out.hasPrefix(m.from) {
             out = m.to + out.dropFirst(m.from.count)
         }
         if out.hasPrefix("//") { out = "https:" + out }
@@ -37,9 +67,10 @@ public enum TxinCDN {
         return out
     }
 
-    /// 探测：返回 true 表示国内域名可用（没被劫持）
+    // MARK: - 探测
+
+    /// 返回 true 表示国内域名可用（没被劫持）
     public static func probeDomestic() async -> Bool {
-        // 一个必定存在的静态资源（headico 编号 1 通常存在；失败就换 banner 兜底）
         let probePath = "/hc237/common_file/headico/common/122.bnc"
         guard let url = URL(string: "https://\(primaryHost)\(probePath)") else { return false }
         var req = URLRequest(url: url)
@@ -49,7 +80,6 @@ public enum TxinCDN {
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return false }
             let ctype = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
-            // 拦截页特征：text/html，且长度恰好 11545
             if ctype.contains("text/html") { return false }
             if data.count == 11545 { return false }
             return true
@@ -58,13 +88,9 @@ public enum TxinCDN {
         }
     }
 
-    /// 启动时调用一次：国产域名被劫持就切到 CloudFront
+    /// 启动时调用一次：国内域名被劫持就切到 CloudFront
     public static func autoSelectMirror() async {
         let domesticOK = await probeDomestic()
-        if domesticOK {
-            activeMirrors = []
-        } else {
-            activeMirrors = mirrors
-        }
+        State.shared.mirrors = domesticOK ? [] : mirrors
     }
 }
