@@ -1,0 +1,37 @@
+{
+  "secret": "x3t8rvtaescfe38s",
+  "cookieKey": "4ntmubrorxzqalmq",
+  "note": "gzip 使用 zlib 默认头（1f 8b 08 00 ...），padding 为 PKCS7，密文 = IV(16) || AES-256-CBC(gzip(JSON))",
+  "requestVectors": [
+    {
+      "requestId": "00000000-0000-4000-8000-000000000000",
+      "payload": {
+        "data": {},
+        "token": "",
+        "deviceId": "test-device"
+      },
+      "keyHex": "d76e7d5665df6534d7efc1ed1593cbf75c1b6bf0644df7cc854ab92969fdccee",
+      "ivHex": "000102030405060708090a0b0c0d0e0f",
+      "gzipBase64": "H4sIAAAAAAACCqtWSkksSVSyqq7VUSrJz07NU7JSUtJRSkkty0xO9UxRslIqSS0u0YXwlWoBaeG8EC8AAAA=",
+      "bodyBase64": "AAECAwQFBgcICQoLDA0ODxgTJDvWHJGol1TAuGYDMrOzyBxaCogrGkZTZSD6HXVHiQK3RJPtuJ2pjfFr2VXYjtg4CGgKKwEHEUIAh2jxVY0="
+    },
+    {
+      "requestId": "11111111-2222-4333-8444-555555555555",
+      "payload": {
+        "data": {
+          "id": "309770"
+        },
+        "token": "D_x_6288240",
+        "deviceId": "abc"
+      },
+      "keyHex": "96c4baf148f10cfe02fc8ef8d031f2ec57a5558816b5f1a72cda8057851609e3",
+      "ivHex": "ffeeddccbbaa99887766554433221100",
+      "gzipBase64": "H4sIAAAAAAACCqtWSkksSVSyqlbKTFGyUjI2sDQ3N1Cq1VEqyc9OzVOyUnKJr4g3M7KwMDIxUNJRSkkty0xO9QQpTUxKVqoFAKWKB1k/AAAA",
+      "bodyBase64": "/+7dzLuqmYh3ZlVEMyIRANJOhdcH4+f+58ppfYTb0ikHBNH34jDOjBaL4zFwQZG2uUrrLHLLziiGxulZYLXTKmVh9ic/nTgeoy6Yxd16pEy9FRcPWBGOVKWKKIRh43LylwEVRKgChj0ImlK4zkSfhg=="
+    }
+  ],
+  "cookieVector": {
+    "plaintext": "{\"user_id\":\"1\",\"token\":\"D_abc\",\"is_vip\":\"n\"}",
+    "cipherBase64": "k1wbPKopIz7DjjGbI6ti2+yz1aQpTidN/n0G9SJMMpH52zjBNnHytnScr/ERqXOW"
+  }
+}

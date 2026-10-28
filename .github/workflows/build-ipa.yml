@@ -1,0 +1,110 @@
+name: Build iOS IPA
+
+# 产出未签名 ipa（TrollStore / Sideloadly / AltStore 自签用）。
+# macos-14 runner 自带 Xcode，能把 ios/ 工程编译成 ARM64 Mach-O。
+#
+# 想要签名 ipa 需要在仓库里配 secrets：
+#   MAC_CERT_P12_BASE64 / MAC_CERT_PASSWORD / TEAM_ID / PROVISION_PROFILE_BASE64
+# 没配就只出未签名版——足够用自签工具装了。
+
+on:
+  push:
+    branches: [main, master]
+    paths: ['ios/**', 'Sources/**', 'tools/**', 'scripts/build-ipa.sh', '.github/workflows/build-ipa.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 定位工程根
+        run: |
+          if [ -f apple/ios/TxinApp.xcodeproj/project.pbxproj ]; then
+            echo "PROJ=apple" >> "$GITHUB_ENV"
+          elif [ -f ios/TxinApp.xcodeproj/project.pbxproj ]; then
+            echo "PROJ=." >> "$GITHUB_ENV"
+          else
+            echo "::error::没找到 ios/TxinApp.xcodeproj"
+            exit 1
+          fi
+
+      - name: 工具链
+        run: |
+          xcodebuild -version
+          xcode-select -p
+          sw_vers
+
+      - name: 重新生成 Xcode 工程并校验
+        working-directory: ${{ env.PROJ }}
+        run: |
+          python3 tools/gen_ios_xcodeproj.py --verify
+
+      - name: 源码结构自查
+        working-directory: ${{ env.PROJ }}
+        run: |
+          if command -v node >/dev/null && [ -f scripts/lint_swift.mjs ]; then
+            node scripts/lint_swift.mjs ios || true
+          fi
+
+      - name: 打未签名 ipa
+        working-directory: ${{ env.PROJ }}
+        run: |
+          chmod +x scripts/build-ipa.sh
+          ./scripts/build-ipa.sh --unsigned
+
+      - name: 产物清单
+        working-directory: ${{ env.PROJ }}
+        run: |
+          ls -la build/*.ipa || true
+          echo "--- Mach-O ---"
+          file build/dd/Build/Products/Release-iphoneos/Txin.app/Txin || true
+          lipo -info build/dd/Build/Products/Release-iphoneos/Txin.app/Txin || true
+          echo "--- bundle ---"
+          ls -la build/dd/Build/Products/Release-iphoneos/Txin.app | head -20 || true
+
+      - name: 上传 ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Txin-ipa-unsigned-${{ github.run_number }}
+          path: ${{ env.PROJ }}/build/*.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      # 可选：配置了证书就顺带出签名版
+      - name: 打签名 ipa
+        if: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+        working-directory: ${{ env.PROJ }}
+        env:
+          CERT_B64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          CERT_PWD: ${{ secrets.MAC_CERT_PASSWORD }}
+          PROV_B64: ${{ secrets.PROVISION_PROFILE_BASE64 }}
+          TEAM: ${{ secrets.TEAM_ID }}
+        run: |
+          set +x
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p actions "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p actions "$KEYCHAIN"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PWD" \
+            -T /usr/bin/codesign -T /usr/bin/xcodebuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          echo "$PROV_B64" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/txin.mobileprovision
+          ./scripts/build-ipa.sh --signed --team "$TEAM"
+
+      - name: 上传签名 ipa
+        if: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Txin-ipa-signed-${{ github.run_number }}
+          path: ${{ env.PROJ }}/build/Txin-1.0.0.ipa
+          if-no-files-found: warn

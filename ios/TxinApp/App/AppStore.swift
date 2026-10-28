@@ -1,0 +1,236 @@
+//
+//  AppStore.swift
+//  Txin （iOS）
+//
+
+import Foundation
+import SwiftUI
+import UIKit
+
+// MARK: - 下载任务（值类型，配合 @Published 数组）
+
+struct DownloadJob: Identifiable, Equatable {
+    enum Phase: String {
+        case queued      = "排队中"
+        case playlist    = "取播放列表"
+        case downloading = "下载中"
+        case merging     = "合并中"
+        case done        = "已完成"
+        case failed      = "失败"
+    }
+
+    let id: String
+    let title: String
+    var phase: Phase = .queued
+    var done: Int = 0
+    var total: Int = 0
+    var bytes: Int64 = 0
+    var filePath: String?
+    var note: String = ""
+
+    var fraction: Double { total > 0 ? Double(done) / Double(total) : 0 }
+    var sizeText: String { String(format: "%.1f MB", Double(bytes) / 1_048_576) }
+    var fileURL: URL? { filePath.map { URL(fileURLWithPath: $0) } }
+}
+
+// MARK: - 主状态
+
+@MainActor
+final class AppStore: ObservableObject {
+
+    @Published var profile: TxinProfile?
+    @Published var deviceId: String = ""
+    @Published var systemInfo: TxinSystemInfo?
+    @Published var cdnDomesticOK: Bool?
+
+    @Published var blocks: [TxinCategoryBlock] = []
+    @Published var artists: [TxinArtist] = []
+    @Published var tags: [TxinTagFull] = []
+    @Published var page: Int = 1
+
+    @Published var jobs: [DownloadJob] = []
+    @Published var statusText: String = "准备中…"
+    @Published var errorText: String?
+
+    private(set) var client: TxinClient?
+
+    // MARK: 路径
+
+    var documentsURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+
+    var downloadRoot: URL {
+        documentsURL.appendingPathComponent("txin", isDirectory: true)
+    }
+
+    var sessionSummary: String {
+        """
+        user_id: \(profile?.user_id ?? "-")
+        username: \(profile?.username ?? "-")
+        nickname: \(profile?.nickname ?? "-")
+        is_vip: \(profile?.is_vip ?? "-")
+        token: \(profile?.token ?? "-")
+        deviceId: \(deviceId)
+        cdn: \(cdnDomesticOK == true ? "国内直连" : "CloudFront 镜像")
+        """
+    }
+
+    // MARK: 启动
+
+    func bootstrap() async {
+        guard client == nil else { return }
+        statusText = "建立会话…"
+        do {
+            let c = TxinClient()
+            try await c.bootstrap()
+            self.client = c
+            self.profile = await c.profile
+            self.deviceId = await c.deviceId
+
+            statusText = "探测 CDN…"
+            let ok = await TxinCDN.probeDomestic()
+            self.cdnDomesticOK = ok
+            await TxinCDN.autoSelectMirror()
+
+            if let info = try? await c.systemInfo() { self.systemInfo = info.data }
+            try? FileManager.default.createDirectory(at: downloadRoot,
+                                                     withIntermediateDirectories: true)
+            await loadHome()
+        } catch {
+            errorText = "\(error)"
+            statusText = "会话建立失败"
+        }
+    }
+
+    // MARK: 列表
+
+    func loadHome() async {
+        guard let c = client else { return }
+        statusText = "加载中…"
+        do {
+            async let movies = c.movieHome(catId: "1", page: page)
+            async let artistHome = c.artistHome()
+            let (m, a) = try await (movies, artistHome)
+            self.blocks = m.data?.data ?? []
+            self.artists = a.data?.top_up ?? []
+            if tags.isEmpty, let t = try? await c.tags() {
+                self.tags = t.data?.data ?? []
+            }
+            statusText = "\(blocks.reduce(0) { $0 + ($1.items?.count ?? 0) }) 条 · 第 \(page) 页"
+        } catch {
+            errorText = "\(error)"
+            statusText = "加载失败"
+        }
+    }
+
+    func changePage(_ p: Int) async {
+        page = max(1, p)
+        await loadHome()
+    }
+
+    func movieDetail(id: String) async -> TxinMovieDetail? {
+        guard let c = client else { return nil }
+        do {
+            let r = try await c.movieDetail(id: id)
+            return r.data
+        } catch {
+            errorText = "\(error)"
+            return nil
+        }
+    }
+
+    func probeCDN() async {
+        let ok = await TxinCDN.probeDomestic()
+        cdnDomesticOK = ok
+        await TxinCDN.autoSelectMirror()
+        statusText = ok ? "国内 CDN 可用" : "已切 CloudFront 镜像"
+    }
+
+    // MARK: 下载
+
+    func isDownloading(_ id: String) -> Bool {
+        jobs.contains { $0.id == id && ($0.phase == .queued || $0.phase == .playlist || $0.phase == .downloading) }
+    }
+
+    func job(for id: String) -> DownloadJob? {
+        jobs.first { $0.id == id }
+    }
+
+    func startDownload(id: String, title: String) async {
+        guard let c = client else { return }
+        if isDownloading(id) { return }
+
+        jobs.insert(DownloadJob(id: id, title: title), at: 0)
+        let idx = 0
+
+        do {
+            let r = try await c.movieDetail(id: id)
+            guard let link = r.data?.bestLink, let m3u8 = link.m3u8_url else {
+                throw NSError(domain: "txin", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "拿不到播放地址"])
+            }
+            let full = m3u8.hasPrefix("http") ? m3u8 : TxinClient.defaultHost + m3u8
+            update(idx) { $0.phase = .playlist }
+
+            let dl = HLSDownloader(concurrency: 5)
+            let playlist = try await dl.fetchPlaylist(m3u8: full, referer: TxinClient.defaultHost + "/")
+            update(idx) { $0.total = playlist.segments.count; $0.phase = .downloading }
+
+            let dir = downloadRoot.appendingPathComponent(id, isDirectory: true)
+            let merged = try await dl.download(
+                playlist,
+                to: dir,
+                referer: TxinClient.defaultHost + "/",
+                onProgress: { p in
+                    Task { @MainActor in
+                        self.update(idx) { $0.done = p.done; $0.bytes = p.bytes }
+                    }
+                },
+                onState: { s in
+                    Task { @MainActor in self.update(idx) { $0.note = s } }
+                })
+
+            update(idx) { $0.phase = .merging }
+            let safe = title.replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: ":", with: "_")
+            let final = dir.appendingPathComponent("\(id)_\(safe).ts")
+            try? FileManager.default.removeItem(at: final)
+            try FileManager.default.moveItem(at: merged, to: final)
+
+            let size = (try? FileManager.default
+                .attributesOfItem(atPath: final.path)[.size] as? Int64) ?? 0
+            update(idx) {
+                $0.phase = .done
+                $0.filePath = final.path
+                $0.bytes = size
+                $0.note = ""
+            }
+            statusText = "已保存 \(final.lastPathComponent)"
+        } catch {
+            update(idx) { $0.phase = .failed; $0.note = "\(error)" }
+            errorText = "\(error)"
+        }
+    }
+
+    private func update(_ idx: Int, _ body: (inout DownloadJob) -> Void) {
+        guard jobs.indices.contains(idx) else { return }
+        body(&jobs[idx])
+    }
+
+    func deleteDownload(_ job: DownloadJob) {
+        if let p = job.filePath {
+            try? FileManager.default.removeItem(atPath: p)
+            let dir = (p as NSString).deletingLastPathComponent
+            try? FileManager.default.removeItem(atPath: dir)
+        }
+        jobs.removeAll { $0.id == job.id }
+    }
+
+    func clearFinished() {
+        for j in jobs where j.phase == .done || j.phase == .failed {
+            if j.phase == .done { deleteDownload(j) }
+        }
+        jobs.removeAll { $0.phase == .failed }
+    }
+}

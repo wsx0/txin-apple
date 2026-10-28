@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  method 取值，按你要的分发方式改：
+	    development  → 装到注册过的设备（免费账号只能这个，7 天有效）
+	    ad-hoc       → 分发给已登记 UDID 的设备（需付费账号）
+	    app-store    → 上传 App Store / TestFlight
+	    enterprise   → 企业内部分发（需企业账号）
+	  build-ipa.sh 默认用 development。
+	-->
+	<key>method</key>
+	<string>development</string>
+
+	<key>signingStyle</key>
+	<string>automatic</string>
+
+	<!-- 团队 ID：Xcode → Settings → Accounts → 选中账号后括号里那串 -->
+	<key>teamID</key>
+	<string>TEAMID</string>
+
+	<key>stripSwiftSymbols</key>
+	<true/>
+	<key>compileBitcode</key>
+	<false/>
+	<key>thinning</key>
+	<string>&lt;none&gt;</string>
+
+	<!-- 只保留主 app，不打符号包 -->
+	<key>embedOnDemandResources</key>
+	<false/>
+</dict>
+</plist>

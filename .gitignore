@@ -1,0 +1,42 @@
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+
+# 构建产物
+build/
+dist/
+*.app
+*.dmg
+*.ipa
+*.ts
+!Sources/**/*.ts
+
+# 下载内容
+downloads/
+~/Movies/txin/
+enc.key
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+._*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*~
+
+# 本地实验
+*.log
+tmp/
+scratch/
+
+# 授权临时文件（绝不要提交）
+.auth/
+*.token

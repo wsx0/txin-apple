@@ -1,0 +1,22 @@
+# bash / shell 必须是 LF，否则 macOS 上会报 "bad interpreter: /bin/bash^M"
+*.sh        text eol=lf
+*.command   text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+Dockerfile  text eol=lf
+
+# Python / JS / JSON / Swift / Markdown 统一 LF（跨平台工具链都吃 LF）
+*.py        text eol=lf
+*.mjs       text eol=lf
+*.js        text eol=lf
+*.json      text eol=lf
+*.swift     text eol=lf
+*.md        text eol=lf
+*.plist     text eol=lf
+
+# 二进制原样，别做换行转换
+*.icns      binary
+*.png       binary
+*.ts        binary
+*.bin       binary
+*.key       binary

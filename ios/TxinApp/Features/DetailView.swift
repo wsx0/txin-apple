@@ -1,0 +1,196 @@
+//
+//  DetailView.swift
+//  Txin （iOS）
+//
+
+import SwiftUI
+import AVKit
+
+struct DetailView: View {
+    let movie: TxinMovieBrief
+
+    @EnvironmentObject private var store: AppStore
+    @State private var detail: TxinMovieDetail?
+    @State private var player: AVPlayer?
+    @State private var playingLine: String?
+    @State private var loading = true
+
+    private var job: DownloadJob? { store.job(for: movie.id) }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                poster
+
+                header
+
+                if let p = player {
+                    VideoPlayer(player: p)
+                        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+
+                lines
+
+                actions
+
+                if let d = detail, let desc = d.description,
+                   !desc.isEmpty, desc != "当前暂无简介" {
+                    Text(desc)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 30)
+        }
+        .navigationTitle(movie.name ?? "详情")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            guard detail == nil else { return }
+            detail = await store.movieDetail(id: movie.id)
+            loading = false
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+            playingLine = nil
+        }
+    }
+
+    // MARK: 组件
+
+    private var poster: some View {
+        AsyncImage(url: movie.coverURL) { phase in
+            switch phase {
+            case .success(let img):
+                img.resizable().aspectRatio(contentMode: .fit)
+            case .failure:
+                Rectangle().fill(.quaternary)
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .overlay(Image(systemName: "film").font(.largeTitle).foregroundStyle(.tertiary))
+            default:
+                Rectangle().fill(.quaternary)
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .overlay(ProgressView())
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.top, 8)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(detail?.name ?? movie.name ?? "-")
+                .font(.title3.bold())
+            HStack(spacing: 10) {
+                if movie.isPaid {
+                    Text("VIP")
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Color.orange).foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                if let c = detail?.category?.name { Text(c) }
+                if let d = detail?.duration ?? movie.duration { Text(d) }
+                if let c = detail?.click ?? movie.click {
+                    Label(c, systemImage: "play.circle")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var lines: some View {
+        let links = detail?.play_links ?? []
+        return Group {
+            if !links.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("线路").font(.caption.bold()).foregroundStyle(.secondary)
+                    ForEach(Array(links.enumerated()), id: \.offset) { _, l in
+                        Button {
+                            play(line: l)
+                        } label: {
+                            HStack {
+                                Image(systemName: playingLine == l.code
+                                      ? "stop.circle.fill" : "play.circle.fill")
+                                Text(l.name ?? l.code ?? "线路")
+                                Spacer()
+                                Text(l.m3u8_url ?? "")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .font(.footnote)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(playingLine == l.code ? .red : .pink)
+                    }
+                }
+            }
+        }
+    }
+
+    private var actions: some View {
+        VStack(spacing: 8) {
+            if let j = job {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(j.phase.rawValue).font(.caption.bold())
+                        Spacer()
+                        Text("\(j.done)/\(j.total)  \(j.sizeText)")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    if j.total > 0 {
+                        ProgressView(value: j.fraction)
+                    }
+                    if !j.note.isEmpty {
+                        Text(j.note).font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(2)
+                    }
+                    if let url = j.fileURL {
+                        ShareLink(item: url) {
+                            Label("导出 / 分享", systemImage: "square.and.arrow.up")
+                                .font(.footnote)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color.secondary.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                Button {
+                    Task { await store.startDownload(id: movie.id, title: movie.name ?? movie.id) }
+                } label: {
+                    Label("下载并解密", systemImage: "arrow.down.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.pink)
+            }
+        }
+    }
+
+    private func play(line: TxinPlayLink) {
+        guard let raw = line.m3u8_url else { return }
+        if playingLine == line.code {
+            player?.pause(); player = nil; playingLine = nil
+            return
+        }
+        let full = raw.hasPrefix("http") ? raw : TxinClient.defaultHost + raw
+        guard let url = URL(string: full) else { return }
+
+        let asset = AVURLAsset(url: url, options: [
+            "AVURLAssetHTTPHeaderFieldsKey": [
+                "User-Agent": TxinClient.userAgent,
+                "Referer": TxinClient.defaultHost + "/",
+            ]
+        ])
+        let p = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        player = p
+        playingLine = line.code
+        p.play()
+    }
+}
