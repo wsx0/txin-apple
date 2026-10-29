@@ -97,33 +97,44 @@ struct DetailView: View {
         return Group {
             if !links.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        Text("线路").font(.caption.bold()).foregroundStyle(.secondary)
-                        if localFile != nil {
-                            Label("优先播放本地文件", systemImage: "internaldrive.fill")
+                    if localFile != nil {
+                        // 已下载：只给一个"播放本地视频"入口，不走网络
+                        HStack(spacing: 6) {
+                            Label("本地文件", systemImage: "internaldrive.fill")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.green)
+                            Spacer()
+                            Text(localFile?.lastPathComponent ?? "")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                         }
-                    }
-                    ForEach(Array(links.enumerated()), id: \.offset) { _, l in
                         Button {
-                            play(line: l)
+                            play(line: links[0])
                         } label: {
                             HStack {
-                                Image(systemName: (playingLine == "local" || playingLine == l.code)
+                                Image(systemName: playingLine == "local"
                                       ? "stop.circle.fill" : "play.circle.fill")
-                                Text(l.name ?? l.code ?? "线路")
+                                Text(playingLine == "local" ? "停止" : "播放本地视频")
                                 Spacer()
-                                Text(localFile != nil ? "本地文件" : (l.m3u8_url ?? ""))
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
                             }
                             .font(.footnote)
                         }
-                        .buttonStyle(.bordered)
-                        .tint((playingLine == "local" || playingLine == l.code) ? .red : .pink)
+                        .buttonStyle(.borderedProminent)
+                        .tint(playingLine == "local" ? .red : .green)
+                    } else {
+                        // 没下载：不提供流播入口。
+                        // CDN 带宽不稳时直接流播必然中途断，与其让人误点，不如不给。
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.orange)
+                            Text("要先下载才能播放 —— CDN 流播在手机网络上撑不住")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
                     }
                 }
             }
