@@ -64,7 +64,7 @@ public final class TxinResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     public func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
                                shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest) -> Bool {
-        guard let target = decode(request.request.url) else { return false }
+        guard let reqURL = request.request.url, let target = decode(reqURL) else { return false }
         let key = target.absoluteString
 
         // 命中缓存
