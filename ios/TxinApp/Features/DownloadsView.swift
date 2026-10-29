@@ -237,6 +237,13 @@ struct DiagnoseSheet: View {
                                bytes: segBytes,
                                note: "解密后的分片"))
         }
+        // remux 失败原因（成功时里面写的是 "ok"）
+        let errFile = dir.appendingPathComponent("remux-error.txt")
+        if let txt = try? String(contentsOf: errFile, encoding: .utf8) {
+            out.append(FileRow(name: "remux-error.txt",
+                               bytes: Int64(txt.utf8.count),
+                               note: txt == "ok" ? "remux 成功" : txt))
+        }
         rows = out
         summary = "(\(names.count) 个文件)"
     }
