@@ -23,14 +23,10 @@ struct DetailPane: View {
                         VideoPlayer(player: player)
                             .aspectRatio(16.0 / 9.0, contentMode: .fit)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
-                    } else if let cover = d.coverURL {
-                        AsyncImage(url: cover) { phase in
-                            if let img = phase.image {
-                                img.resizable().aspectRatio(contentMode: .fit)
-                            } else {
-                                Rectangle().fill(.quaternary)
-                                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                            }
+                    } else {
+                        RemoteImage(url: d.img, contentMode: .fit) {
+                            ImagePlaceholder(icon: "film")
+                                .aspectRatio(16.0 / 9.0, contentMode: .fit)
                         }
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
