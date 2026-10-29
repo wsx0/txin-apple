@@ -133,29 +133,46 @@ struct VLCPlayerScreen: View {
         .onTapGesture { showControls.toggle() }
         .onAppear { start() }
         .onDisappear { stop() }
+        // drawable 必须在 surface 真正就位后再挂。
+        // 之前只在 start() 里设一次，而 makeUIView 里的赋值是异步的 ——
+        // onAppear 先跑就会把 nil 设给 drawable，结果是黑屏有声。
+        .onChange(of: surface) { newSurface in
+            if let newSurface {
+                player.drawable = newSurface
+            }
+        }
     }
 
     // MARK: - 控制
 
     private func start() {
+        // 防止重复 start 造成多个 media 叠加
+        player.stop()
+
         let media = VLCMedia(url: url)
         // 缓冲区给足，手机网络波动时不至于立刻断
         media.addOption(":network-caching=4000")
-        media.addOption(":clock-jitter=0")
-        media.addOption(":clock-synchro=0")
-        // 让 FFmpeg 自己处理 HLS 的 AES-128
+        // HLS 的每个分片和 key 由 libavformat 发，带上 referer 才不会被 CDN 403
         media.addOption(":http-referrer=" + TxinEndpoint.base)
         media.addOption(":http-user-agent=" + TxinClient.userAgent)
+        media.addOption(":http-reconnect=true")
+        media.addOption(":network-timeout=15")
 
         player.media = media
         player.delegate = VLCDelegate.shared
-        VLCDelegate.shared.onState = { s in
+        VLCDelegate.shared.onState = { [self] s in
             DispatchQueue.main.async {
                 stateText = s
-                isPlaying = (player.isPlaying)
+                isPlaying = player.isPlaying
+                if s == "出错了" {
+                    showControls = true
+                }
             }
         }
-        player.drawable = surface
+        // 能设就立刻设，设不上也没关系 —— onChange(of: surface) 会补
+        if let surface {
+            player.drawable = surface
+        }
         player.play()
 
         observer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
@@ -174,7 +191,10 @@ struct VLCPlayerScreen: View {
     private func stop() {
         observer?.invalidate()
         observer = nil
+        VLCDelegate.shared.onState = nil
         player.stop()
+        player.drawable = nil
+        player.media = nil
     }
 
     private func togglePlay() {
