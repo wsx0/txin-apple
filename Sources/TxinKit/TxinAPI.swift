@@ -27,13 +27,52 @@ public enum TxinAPIError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .http(let code, let path): return "HTTP \(code) @ \(path)"
+        case .http(let code, let path):
+            if code == -1009 || code < 0 {
+                return "网络连不上（\(path)）。域名 DNS 可能被污染，或需要代理。"
+            }
+            return "HTTP \(code) @ \(path)"
         case .emptyBody: return "响应体为空"
         case .decode(let m): return "解码失败: \(m)"
-        case .business(let m): return "业务错误: \(m)"
+        case .business(let m): return m
         case .noSession: return "尚未建立会话，先调用 bootstrap()"
         }
     }
+}
+
+// MARK: - 当前生效的接入点
+
+/// bootstrap 探测成功后把选中的主机写进这里，其它地方（拼 m3u8 绝对地址、Referer）
+/// 直接读它即可，不用把 async 传播到 UI 层。
+public enum TxinEndpoint {
+
+    final class State: @unchecked Sendable {
+        static let shared = State()
+        private let lock = NSLock()
+        private var value = TxinClient.defaultHost
+
+        var host: String {
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return value
+            }
+            set {
+                lock.lock()
+                defer { lock.unlock() }
+                value = newValue
+            }
+        }
+    }
+
+    /// 形如 https://tangxgw.com
+    public static var current: String {
+        get { State.shared.host }
+        set { State.shared.host = newValue }
+    }
+
+    /// 形如 https://tangxgw.com/
+    public static var base: String { current + "/" }
 }
 
 public actor TxinClient {
@@ -43,7 +82,20 @@ public actor TxinClient {
     public static let apiSecret = "x3t8rvtaescfe38s"
     public static let cookieKey = "4ntmubrorxzqalmq"
 
-    public let host: String
+    /// 候选接入点。
+    /// 第一个是主域名，国内直连时 DNS 常被污染（解析出 0 个 IP，NSURLError -1009）。
+    /// 第二个是 CloudFront 的默认域名 —— 实测 `GET /` 直接返回 200 + 完整首页，
+    /// 不需要 Host 头覆盖；而 cloudfront.net 不在污染名单里，所以它能绕过 DNS 问题。
+    /// App 启动时逐个探测，选第一个真正能拿到页面的。
+    public static let candidateHosts: [String] = [
+        "https://tangxgw.com",
+        "https://d135a0g6n89vl1.cloudfront.net",
+        "https://tangxinweb.com",
+        "https://txinweb1.com",
+        "https://tangxin.net",
+    ]
+
+    public private(set) var host: String
     private let session: URLSession
     private var cookies: [String: String] = [:]
 
@@ -51,7 +103,8 @@ public actor TxinClient {
     public private(set) var deviceId: String = ""
     public private(set) var systemInfo: TxinSystemInfo?
 
-    public init(host: String = TxinClient.defaultHost) {
+    /// host 传空表示自动探测
+    public init(host: String = "") {
         self.host = host
         // 注意：不要用 .ephemeral + httpShouldSetCookies=false。
         // 那种配置下 macOS 的 URLSession 根本不会把 Set-Cookie 放进 allHeaderFields，
@@ -66,10 +119,47 @@ public actor TxinClient {
         self.session = URLSession(configuration: cfg)
     }
 
+    // MARK: - 接入点探测
+
+    /// 逐个试候选主机，返回第一个能拿到正常首页的（而不是拦截页/超时）
+    public static func probeHost() async -> String? {
+        for h in candidateHosts {
+            guard let url = URL(string: h + "/") else { continue }
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 8
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { continue }
+                let ctype = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+                // 首页至少几十 KB；拦截页通常是个很短的 HTML
+                if ctype.contains("text/html") && data.count > 10_000 {
+                    return h
+                }
+            } catch {
+                continue
+            }
+        }
+        return nil
+    }
+
     // MARK: - 会话建立
 
     /// 拉一次首页拿 Set-Cookie，解出匿名账号
     public func bootstrap() async throws {
+        // 没指定 host 就先探测
+        if host.isEmpty {
+            guard let h = await TxinClient.probeHost() else {
+                throw TxinAPIError.business(
+                    "所有候选域名都连不上。国内网络常见的两个原因：\n"
+                    + "① 域名 DNS 被污染（解析出 0 个 IP）\n"
+                    + "② 需要代理才能访问\n"
+                    + "已尝试：\(TxinClient.candidateHosts.joined(separator: "、"))")
+            }
+            host = h
+            TxinEndpoint.current = h
+        }
+
         guard let url = URL(string: host + "/") else { throw TxinAPIError.http(0, "bad host") }
         var req = URLRequest(url: url)
         req.setValue(TxinClient.userAgent, forHTTPHeaderField: "User-Agent")
