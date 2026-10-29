@@ -266,7 +266,13 @@ public actor TxinClient {
         let r: TxinEnvelope<TxinSystemInfo> = try await call("/system/info",
                                                              payload: ["channel_code": NSNull(),
                                                                        "share_code": NSNull()])
-        if let d = r.data { systemInfo = d }
+        if let d = r.data {
+            systemInfo = d
+            // 图片解密要用它，拿到就立刻写进全局
+            if let k = d.img_key, !k.isEmpty {
+                TxinImage.imgKey = k
+            }
+        }
         return r
     }
 
