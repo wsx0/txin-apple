@@ -1,0 +1,21 @@
+platform :ios, '16.0'
+
+# VLCKit 内建 libVLC + FFmpeg：
+#   · 多 program 的 MPEG-TS 能正确拆解（AVPlayer 只认第一个，这就是"只播几秒"的根因）
+#   · HLS 的 AES-128 分片由它自己解密，不需要我们再调 CCCrypt
+#   · 各种畸形容器都能兜住，是 iOS 上兼容性最好的播放内核
+use_frameworks!
+
+target 'Txin' do
+  pod 'MobileVLCKit', '~> 3.7.4'
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |t|
+    t.build_configurations.each do |c|
+      c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '16.0'
+      # 未签名 ipa 不需要 bitcode；VLCKit 的 xcframework 也不含 bitcode
+      c.build_settings['ENABLE_BITCODE'] = 'NO'
+    end
+  end
+end
