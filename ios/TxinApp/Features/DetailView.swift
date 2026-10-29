@@ -186,14 +186,32 @@ struct DetailView: View {
         return URL(fileURLWithPath: path)
     }
 
+    /// 下载目录里的本地 HLS 播放列表 —— 比裸 .ts 稳得多
+    private var localPlaylist: URL? {
+        guard let f = localFile else { return nil }
+        let m3u8 = f.deletingLastPathComponent().appendingPathComponent("index.m3u8")
+        return FileManager.default.fileExists(atPath: m3u8.path) ? m3u8 : nil
+    }
+
     private func play(line: TxinPlayLink) {
-        // 1) 已下载优先 —— 本地文件不受网络影响
+        // 1) 本地 HLS 播放列表：AVPlayer 原生支持，按分片播，不会只播开头
+        if let pl = localPlaylist {
+            if playingLine == "local" {
+                player?.pause(); player = nil; playingLine = nil
+                return
+            }
+            player = AVPlayer(url: pl)
+            playingLine = "local"
+            player?.play()
+            return
+        }
+
+        // 2) 有整片 .ts 但没有 m3u8（老版本下载的），尽量播
         if let local = localFile {
             if playingLine == "local" {
                 player?.pause(); player = nil; playingLine = nil
                 return
             }
-            // .ts 是 MPEG-TS，告诉 AVFoundation 别按扩展名瞎猜
             let asset = AVURLAsset(url: local, options: [
                 "AVURLAssetOutOfBandMIMETypeKey": "video/mp2t",
             ])
@@ -204,7 +222,7 @@ struct DetailView: View {
             return
         }
 
-        // 2) 没下载才走流播
+        // 3) 没下载才走流播
         guard let raw = line.m3u8_url else { return }
         if playingLine == line.code {
             player?.pause(); player = nil; playingLine = nil
