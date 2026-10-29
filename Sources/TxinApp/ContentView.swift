@@ -130,16 +130,8 @@ struct MovieCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topLeading) {
-                AsyncImage(url: movie.coverURL) { phase in
-                    switch phase {
-                    case .success(let img):
-                        img.resizable().aspectRatio(contentMode: .fill)
-                    case .failure:
-                        Rectangle().fill(.quaternary)
-                            .overlay(Image(systemName: "photo").foregroundStyle(.tertiary))
-                    default:
-                        Rectangle().fill(.quaternary).overlay(ProgressView().controlSize(.small))
-                    }
+                RemoteImage(url: movie.img, contentMode: .fill) {
+                    ImagePlaceholder()
                 }
                 .frame(height: 106)
                 .frame(maxWidth: .infinity)
@@ -205,12 +197,8 @@ struct ArtistGrid: View {
             LazyVGrid(columns: columns, spacing: 14) {
                 ForEach(store.artists) { a in
                     VStack(alignment: .leading, spacing: 6) {
-                        AsyncImage(url: a.avatarURL) { phase in
-                            if let img = phase.image {
-                                img.resizable().aspectRatio(contentMode: .fill)
-                            } else {
-                                Rectangle().fill(.quaternary)
-                            }
+                        RemoteImage(url: a.headico, contentMode: .fill) {
+                            ImagePlaceholder(icon: "person.fill")
                         }
                         .frame(height: 120)
                         .frame(maxWidth: .infinity)
