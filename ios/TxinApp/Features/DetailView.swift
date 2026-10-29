@@ -14,6 +14,9 @@ struct DetailView: View {
     @State private var player: AVPlayer?
     @State private var playingLine: String?
     @State private var loading = true
+    /// 必须强引用：AVAssetResourceLoader 只持弱引用
+    @State private var resLoader: TxinResourceLoader?
+    @State private var stallNote: String = ""
 
     private var job: DownloadJob? { store.job(for: movie.id) }
 
@@ -97,10 +100,45 @@ struct DetailView: View {
         return Group {
             if !links.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
+
+                    // ── 直接播放（不下载）──────────────────────────
+                    Text("直接播放").font(.caption.bold()).foregroundStyle(.secondary)
+
+                    ForEach(Array(links.enumerated()), id: \.offset) { _, l in
+                        Button {
+                            playRemote(line: l)
+                        } label: {
+                            HStack {
+                                Image(systemName: playingLine == l.code
+                                      ? "stop.circle.fill" : "play.circle.fill")
+                                Text(l.name ?? l.code ?? "线路")
+                                Spacer()
+                                if playingLine == l.code {
+                                    Text("播放中").font(.system(size: 9))
+                                }
+                            }
+                            .font(.footnote)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(playingLine == l.code ? .red : .pink)
+                    }
+
+                    if !stallNote.isEmpty {
+                        Text(stallNote)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                    }
+
+                    Text("边看边拉，全部子请求经本地代理转发（带齐 Referer，避免 403）。")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+
+                    Divider().padding(.vertical, 2)
+
+                    // ── 缓存到本地 ─────────────────────────────────
                     if localFile != nil {
-                        // 全部下完
                         HStack(spacing: 6) {
-                            Label("本地文件", systemImage: "internaldrive.fill")
+                            Label("已缓存整片", systemImage: "internaldrive.fill")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.green)
                             Spacer()
@@ -116,71 +154,41 @@ struct DetailView: View {
                             HStack {
                                 Image(systemName: playingLine == "local"
                                       ? "stop.circle.fill" : "play.circle.fill")
-                                Text(playingLine == "local" ? "停止" : "播放本地视频")
+                                Text(playingLine == "local" ? "停止" : "播放已缓存")
                                 Spacer()
                             }
                             .font(.footnote)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                         .tint(playingLine == "local" ? .red : .green)
 
                     } else if let job = job, downloadedSegments > 0 {
-                        // 下载中：可以立刻边下边播
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.mini)
                             Text("已缓存 \(downloadedSegments)/\(max(job.total, 1)) 片")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("播放缓存") { play(line: links[0]) }
+                                .font(.system(size: 10))
                         }
-                        Button {
-                            play(line: links[0])
-                        } label: {
-                            HStack {
-                                Image(systemName: playingLine == "local"
-                                      ? "stop.circle.fill" : "play.circle.fill")
-                                Text(playingLine == "local" ? "停止" : "边下边播")
-                                Spacer()
-                            }
-                            .font(.footnote)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(playingLine == "local" ? .red : .orange)
 
-                    } else if let job = job {
-                        // 刚点下载，还没拿到第一个分片
+                    } else if job == nil {
+                        Button {
+                            Task { await store.startDownload(id: movie.id, title: movie.name ?? movie.id) }
+                        } label: {
+                            Label("后台缓存整片（可选）", systemImage: "arrow.down.circle")
+                                .font(.footnote)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.secondary)
+                    } else {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.mini)
-                            Text(job.phase.rawValue)
+                            Text(job?.phase.rawValue ?? "")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                         }
-
-                    } else {
-                        // 还没开始：一个按钮搞定「开始缓存 + 立即播放」
-                        Button {
-                            Task {
-                                await store.startDownload(id: movie.id, title: movie.name ?? movie.id)
-                                // 等第一个分片落盘就给播放器
-                                for _ in 0..<40 {
-                                    try? await Task.sleep(nanoseconds: 250_000_000)
-                                    if downloadedSegments >= 2 { break }
-                                }
-                                play(line: links[0])
-                            }
-                        } label: {
-                            HStack {
-                                Image(systemName: "play.circle.fill")
-                                Text("边下边播")
-                                Spacer()
-                            }
-                            .font(.footnote)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.pink)
-
-                        Text("先缓存两三个分片就开始播，后面边下边拉，不用等整片下完。")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
                     }
                 }
             }
@@ -260,6 +268,44 @@ struct DetailView: View {
         return names.filter { $0.hasPrefix("seg_") && $0.hasSuffix(".ts") }.count
     }
 
+    /// 直接播远程 m3u8 —— 走 TxinResourceLoader 代理，所有子请求都带齐 header
+    private func playRemote(line: TxinPlayLink) {
+        if playingLine == line.code {
+            player?.pause(); player = nil; playingLine = nil; resLoader = nil
+            return
+        }
+        guard let raw = line.m3u8_url else { return }
+        let full = raw.hasPrefix("http") ? raw : TxinEndpoint.current + raw
+        guard let url = URL(string: full),
+              let proxied = TxinResourceLoader.encode(url) else { return }
+
+        // 关键：AVURLAssetHTTPHeaderFieldsKey 只管主请求，分片/key 请求不带 Referer，
+        // CDN 会 403 —— 这就是「播几秒就停」。换成 resource loader 全量接管。
+        let loader = TxinResourceLoader(referer: TxinEndpoint.base)
+        resLoader = loader
+
+        let asset = AVURLAsset(url: proxied)
+        asset.resourceLoader.setDelegate(loader, queue: DispatchQueue(label: "txin.resource-loader"))
+
+        let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = 30      // 预缓冲 30 秒，抗抖动
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
+
+        let p = AVPlayer(playerItem: item)
+        p.automaticallyWaitsToMinimizeStalling = true   // 卡住时等缓冲，而不是直接停
+        player = p
+        playingLine = line.code
+        stallNote = ""
+        p.play()
+
+        // 监听状态，卡住时给用户一句话
+        NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.playbackStalledNotification,
+            object: item, queue: .main) { _ in
+                stallNote = "网络跟不上，正在缓冲…"
+            }
+    }
+
     private func play(line: TxinPlayLink) {
         if playingLine == "local" {
             player?.pause(); player = nil; playingLine = nil
@@ -294,24 +340,7 @@ struct DetailView: View {
             return
         }
 
-        // 4) 远程流播
-        guard let raw = line.m3u8_url else { return }
-        if playingLine == line.code {
-            player?.pause(); player = nil; playingLine = nil
-            return
-        }
-        let full = raw.hasPrefix("http") ? raw : TxinEndpoint.current + raw
-        guard let url = URL(string: full) else { return }
-
-        let asset = AVURLAsset(url: url, options: [
-            "AVURLAssetHTTPHeaderFieldsKey": [
-                "User-Agent": TxinClient.userAgent,
-                "Referer": TxinEndpoint.base,
-            ]
-        ])
-        let p = AVPlayer(playerItem: AVPlayerItem(asset: asset))
-        player = p
-        playingLine = line.code
-        p.play()
+        // 4) 远程流播（走 loader）
+        playRemote(line: line)
     }
 }
