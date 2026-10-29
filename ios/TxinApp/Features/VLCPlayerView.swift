@@ -41,6 +41,7 @@ struct VLCPlayerScreen: View {
     let title: String
     let onClose: () -> Void
 
+    @EnvironmentObject private var store: AppStore
     @State private var player = VLCMediaPlayer()
     @State private var surface: VLCVideoSurface.SurfaceView?
     @State private var stateText = "缓冲中…"
@@ -59,6 +60,12 @@ struct VLCPlayerScreen: View {
             VLCSurfaceHolder(surface: $surface)
                 .ignoresSafeArea()
 
+            // 诊断条：一眼看出卡在哪一步
+            VStack {
+                diagBar
+                Spacer()
+            }
+
             // 简单的控制层
             if showControls {
                 VStack {
@@ -76,10 +83,16 @@ struct VLCPlayerScreen: View {
                             .foregroundStyle(.white)
                             .lineLimit(1)
                         Spacer()
-                        Color.clear.frame(width: 41, height: 41)
+                        ShareLink(item: url) {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(12)
+                                .background(.black.opacity(0.4), in: Circle())
+                        }
                     }
                     .padding(.horizontal, 12)
-                    .padding(.top, 8)
+                    .padding(.top, 56)
 
                     Spacer()
 
@@ -133,14 +146,30 @@ struct VLCPlayerScreen: View {
         .onTapGesture { showControls.toggle() }
         .onAppear { start() }
         .onDisappear { stop() }
-        // drawable 必须在 surface 真正就位后再挂。
-        // 之前只在 start() 里设一次，而 makeUIView 里的赋值是异步的 ——
-        // onAppear 先跑就会把 nil 设给 drawable，结果是黑屏有声。
         .onChange(of: surface) { newSurface in
             if let newSurface {
                 player.drawable = newSurface
             }
         }
+    }
+
+    /// 屏幕上的诊断：每一步做了什么、结果如何
+    private var diagBar: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(Array(store.diag.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+            Text("VLC: \(stateText)   \(fmt(time)) / \(fmt(duration))   播放中=\(isPlaying ? "是" : "否")")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.green.opacity(0.85))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.black.opacity(0.45))
+        .padding(.top, 48)
     }
 
     // MARK: - 控制
