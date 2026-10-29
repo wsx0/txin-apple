@@ -128,7 +128,10 @@ struct DetailPane: View {
 
     private func play(line: TxinPlayLink) {
         // 已下载优先：本地文件不受 CDN 带宽影响
-        if let job = store.job(for: d_id()), job.phase == .done, let path = job.filePath,
+        // 注意 macOS 版的 DownloadJob 用的是 state（不是 iOS 那个 phase），也没有 job(for:)
+        if let job = store.jobs.first(where: { $0.id == d_id() }),
+           job.state == .done,
+           let path = job.filePath,
            FileManager.default.fileExists(atPath: path) {
             if playingLine == "local" {
                 player?.pause(); player = nil; playingLine = nil
