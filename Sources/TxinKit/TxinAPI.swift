@@ -53,9 +53,13 @@ public actor TxinClient {
 
     public init(host: String = TxinClient.defaultHost) {
         self.host = host
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.httpShouldSetCookies = false          // cookie 自己管，避免跨域串味
-        cfg.httpCookieAcceptPolicy = .never
+        // 注意：不要用 .ephemeral + httpShouldSetCookies=false。
+        // 那种配置下 macOS 的 URLSession 根本不会把 Set-Cookie 放进 allHeaderFields，
+        // c_tt 就拿不到，只能靠 c_dd 兜底出 deviceId（表现为 user_id/token 全是 "-"）。
+        let cfg = URLSessionConfiguration.default
+        cfg.httpShouldSetCookies = true
+        cfg.httpCookieAcceptPolicy = .always
+        cfg.httpCookieStorage = HTTPCookieStorage.shared
         cfg.timeoutIntervalForRequest = 20
         cfg.timeoutIntervalForResource = 60
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -74,7 +78,18 @@ public actor TxinClient {
         guard let http = resp as? HTTPURLResponse else { throw TxinAPIError.http(0, "/") }
         guard http.statusCode == 200 else { throw TxinAPIError.http(http.statusCode, "/") }
 
-        cookies = TxinClient.parseSetCookie(http)
+        // 首选 HTTPCookieStorage（URLSession 已经把 Set-Cookie 存进去了）
+        var jar: [String: String] = [:]
+        for c in (HTTPCookieStorage.shared.cookies(for: url) ?? []) where c.name.hasPrefix("c_") {
+            jar[c.name] = c.value
+        }
+        // 兜底：直接扫响应头
+        if jar["c_tt"] == nil {
+            for (k, v) in TxinClient.parseSetCookie(http) {
+                if jar[k] == nil { jar[k] = v }
+            }
+        }
+        cookies = jar
         guard !cookies.isEmpty else { throw TxinAPIError.noSession }
 
         if let tt = cookies["c_tt"], let plain = try? decryptCookie(tt) {
