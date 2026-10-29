@@ -194,36 +194,31 @@ struct DetailView: View {
     }
 
     private func play(line: TxinPlayLink) {
-        // 1) 下载后已 remux 成 mp4 —— AVPlayer 对 mp4 支持最完整，直接播
-        if let f = localFile, f.pathExtension.lowercased() == "mp4" {
-            if playingLine == "local" {
-                player?.pause(); player = nil; playingLine = nil
-                return
-            }
-            player = AVPlayer(url: f)
-            playingLine = "local"
-            player?.play()
+        if playingLine == "local" {
+            player?.pause(); player = nil; playingLine = nil
             return
         }
 
-        // 2) 本地 HLS 播放列表：AVPlayer 原生支持，按分片播，不会只播开头
+        // 1) 本地 HLS 播放列表永远排第一。
+        //    分片是解密后的明文，AVPlayer 按 m3u8 逐片读，每片独立解析，
+        //    不会碰「多个 PAT/PMT program」那个坑 —— 这是目前最稳的播放路径。
         if let pl = localPlaylist {
-            if playingLine == "local" {
-                player?.pause(); player = nil; playingLine = nil
-                return
-            }
             player = AVPlayer(url: pl)
             playingLine = "local"
             player?.play()
             return
         }
 
-        // 3) 有整片 .ts 但没有 m3u8（老版本下载的），尽量播
+        // 2) mp4（remux 通过时长校验才会存在）
+        if let f = localFile, f.pathExtension.lowercased() == "mp4" {
+            player = AVPlayer(url: f)
+            playingLine = "local"
+            player?.play()
+            return
+        }
+
+        // 3) 只剩整片 .ts（老版本下载的）
         if let local = localFile {
-            if playingLine == "local" {
-                player?.pause(); player = nil; playingLine = nil
-                return
-            }
             let asset = AVURLAsset(url: local, options: [
                 "AVURLAssetOutOfBandMIMETypeKey": "video/mp2t",
             ])
@@ -234,7 +229,7 @@ struct DetailView: View {
             return
         }
 
-        // 3) 没下载才走流播
+        // 4) 没下载才走远程流播
         guard let raw = line.m3u8_url else { return }
         if playingLine == line.code {
             player?.pause(); player = nil; playingLine = nil
