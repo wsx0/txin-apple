@@ -179,22 +179,31 @@ final class AppStore: ObservableObject {
             return
         }
 
-        // 两条线路的 hash 不同、走不同 CDN 节点，挑一条能通的
+        // 先探一下，能通就用。探测用的 URLSession 和 VLC 自己的请求路径不完全一样，
+        // 所以探不通不代表 VLC 播不了 —— 记住第一个候选，最后兜底交给 VLC 试。
+        var fallback: URL?
         var lastError = ""
+
         for link in links {
             guard let raw = link.m3u8_url else { continue }
             let full = raw.hasPrefix("http") ? raw : TxinEndpoint.current + raw
             guard let url = URL(string: full) else { continue }
+            if fallback == nil { fallback = url }
 
-            // 先确认这个 m3u8 真能拉到，别让用户对着黑屏等
             if await Self.probe(url) {
                 playURL = url
                 return
             }
-            lastError = "线路 \(link.name ?? "") 拉不到播放列表"
+            lastError = "线路 \(link.name ?? "") 探测未通过"
         }
 
-        errorText = lastError.isEmpty ? "所有线路都打不开" : lastError
+        // 全都没探通，仍然给 VLC 一次机会 —— 它的网络栈比我这条 URLSession 更能兜底
+        if let fallback {
+            playURL = fallback
+            return
+        }
+
+        errorText = lastError.isEmpty ? "没有可用线路" : lastError
         playingTitle = nil
     }
 
