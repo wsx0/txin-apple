@@ -393,17 +393,43 @@ public actor HLSDownloader {
         throw lastError ?? HLSError.badPlaylist("remux 全部预设失败")
     }
 
+    /// 取单个分片，带重试。
+    /// CDN 在手机上经常零星超时/断连，一次失败就放弃整个下载太脆了。
     static func fetchSegment(_ session: URLSession, _ urlString: String, _ referer: String) async throws -> [UInt8] {
         guard let url = URL(string: urlString) else { throw HLSError.http(0, urlString) }
-        var req = URLRequest(url: url)
-        req.setValue(TxinClient.userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue(referer, forHTTPHeaderField: "Referer")
-        let (data, resp) = try await session.data(for: req)
-        guard let http = resp as? HTTPURLResponse else { throw HLSError.http(0, urlString) }
-        guard http.statusCode == 200 else { throw HLSError.http(http.statusCode, urlString) }
-        if (http.value(forHTTPHeaderField: "Content-Type") ?? "").contains("html") {
-            throw HLSError.http(200, "被拦截: \(urlString)")
+
+        var lastError: Error?
+        for attempt in 0..<4 {
+            if attempt > 0 {
+                // 退避：0.6s / 1.2s / 2.4s
+                let delay = UInt64(600_000_000) << UInt64(attempt - 1)
+                try? await Task.sleep(nanoseconds: delay)
+            }
+            do {
+                var req = URLRequest(url: url)
+                req.timeoutInterval = 30
+                req.setValue(TxinClient.userAgent, forHTTPHeaderField: "User-Agent")
+                req.setValue(referer, forHTTPHeaderField: "Referer")
+                let (data, resp) = try await session.data(for: req)
+                guard let http = resp as? HTTPURLResponse else {
+                    throw HLSError.http(0, urlString)
+                }
+                guard http.statusCode == 200 else {
+                    throw HLSError.http(http.statusCode, urlString)
+                }
+                let ctype = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+                if ctype.contains("html") {
+                    throw HLSError.http(200, "被拦截: \(urlString)")
+                }
+                if data.isEmpty {
+                    throw HLSError.http(0, "空分片: \(urlString)")
+                }
+                return [UInt8](data)
+            } catch {
+                lastError = error
+                continue
+            }
         }
-        return [UInt8](data)
+        throw lastError ?? HLSError.http(0, urlString)
     }
 }
