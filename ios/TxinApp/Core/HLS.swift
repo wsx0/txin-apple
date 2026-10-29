@@ -263,9 +263,25 @@ public actor HLSDownloader {
             for try await (idx, data) in group {
                 let plain: [UInt8]
                 if let aesKey {
-                    plain = (try? TxinCrypto.aesCBCDecryptNoPadding(key: aesKey, iv: iv, cipher: data)) ?? data
+                    do {
+                        plain = try TxinCrypto.aesCBCDecryptNoPadding(key: aesKey, iv: iv, cipher: data)
+                    } catch {
+                        // 解密失败绝不能把密文当明文写盘 —— 那样得到的 .ts 播放器直接打不开
+                        // （AVFoundationErrorDomain -11828 不支持的媒体格式）。
+                        // 记录原因并抛出，让上层看到真实错误。
+                        try? "分片 \(idx) 解密失败: \(error)".write(
+                            to: dir.appendingPathComponent("decrypt-error.txt"),
+                            atomically: true, encoding: .utf8)
+                        throw HLSError.badPlaylist("分片 \(idx) 解密失败: \(error)")
+                    }
                 } else {
                     plain = data
+                }
+                // 解密结果必须像 TS（首字节 0x47），否则说明 key/iv 不对
+                if let first = plain.first, first != 0x47 {
+                    try? "分片 \(idx) 首字节 0x\(String(format: "%02x", first))，不是 0x47".write(
+                        to: dir.appendingPathComponent("decrypt-error.txt"),
+                        atomically: true, encoding: .utf8)
                 }
                 let segURL = dir.appendingPathComponent(String(format: "seg_%04d.ts", idx))
                 try Data(plain).write(to: segURL)
