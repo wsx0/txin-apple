@@ -159,8 +159,8 @@ struct VLCPlayerScreen: View {
         player.play()
 
         observer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            guard player.media != nil else { return }
-            let total = player.media.length.intValue
+            guard let media = player.media else { return }
+            let total = media.length.intValue
             duration = total
             let cur = player.time.intValue
             time = cur
