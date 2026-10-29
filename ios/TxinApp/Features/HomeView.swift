@@ -29,8 +29,9 @@ struct HomeView: View {
                             }
                             LazyVGrid(columns: columns, spacing: 10) {
                                 ForEach(block.items ?? []) { m in
-                                    NavigationLink {
-                                        DetailView(movie: m)
+                                    // 点一下就播 —— 不进详情页、不下载
+                                    Button {
+                                        store.play(m)
                                     } label: {
                                         MovieCell(movie: m)
                                     }
