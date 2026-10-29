@@ -173,7 +173,7 @@ final class AppStore: ObservableObject {
             let full = m3u8.hasPrefix("http") ? m3u8 : TxinEndpoint.current + m3u8
             update(idx) { $0.phase = .playlist }
 
-            let dl = HLSDownloader(concurrency: 5)
+            let dl = HLSDownloader(concurrency: 4)
             let playlist = try await dl.fetchPlaylist(m3u8: full, referer: TxinEndpoint.base)
             update(idx) { $0.total = playlist.segments.count; $0.phase = .downloading }
 
