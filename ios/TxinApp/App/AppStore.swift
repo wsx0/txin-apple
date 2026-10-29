@@ -57,8 +57,17 @@ final class AppStore: ObservableObject {
 
     /// 正在播的标题，nil 表示没在播
     @Published var playingTitle: String?
-    /// 交给 VLC 的播放地址（VLC 自己带 referrer、自己解 AES-128）
+    /// 交给 VLC 的播放地址（本地明文播放列表）
     @Published var playURL: URL?
+    /// 屏幕诊断：每一步的结果，直接显示在播放界面上
+    @Published var diag: [String] = []
+
+    func note(_ s: String) {
+        let t = String(format: "%02d:%02d ", Int(Date().timeIntervalSince1970) % 3600 / 60,
+                       Int(Date().timeIntervalSince1970) % 60)
+        diag.append(t + s)
+        if diag.count > 12 { diag.removeFirst() }
+    }
 
     private var playTask: Task<Void, Never>?
     /// 后台缓存整片的任务
@@ -181,42 +190,35 @@ final class AppStore: ObservableObject {
     private func startPlay(_ movie: TxinMovieBrief) async {
         playingTitle = movie.name ?? movie.id
         errorText = nil
+        diag.removeAll()
+        note("开始 \(movie.id)")
 
         guard let detail = await movieDetail(id: movie.id),
               let links = detail.play_links, !links.isEmpty else {
+            note("拿不到 play_links")
             errorText = "这部片子拿不到播放地址"
             playingTitle = nil
             return
         }
-
-        // ── 方案：App 自己下载并解密分片，VLC 播本地明文 ──────────────
-        //
-        // 为什么不把远程 m3u8 直接交给播放器：
-        //   分片落在 whk.srslpoh.cn，国内部分网络会把它劫持到
-        //   183.192.65.101 并返回 11545 字节 HTML（状态码仍然 200），
-        //   播放器把这堆 HTML 当 TS 解码，播几秒就停。
-        //   换成 CloudFront 镜像能绕开，但用户侧到底通不通我没法验证。
-        //   唯一的确定性做法：请求和 AEC 解密都由 App 完成，
-        //   播放器只读本地已经解好的明文 TS。
-        //
-        // 用户感知仍是「点了就看」：缓存到第 2 个分片（约 8 秒）就开始播。
+        note("线路 \(links.count) 条")
 
         var lastError = ""
 
-        for link in links {
+        for (idx, link) in links.enumerated() {
             guard let raw = link.m3u8_url else { continue }
             let full = raw.hasPrefix("http") ? raw : TxinEndpoint.current + raw
+            note("L\(idx + 1) \(link.code ?? "?") → \(URL(string: full)?.host ?? "?")")
 
             do {
                 let downloader = HLSDownloader(concurrency: 4)
                 let playlist = try await downloader.fetchPlaylist(m3u8: full,
                                                                   referer: TxinEndpoint.base)
+                note("m3u8 ok 片数=\(playlist.segments.count) key=\(playlist.key != nil ? "有" : "无")")
+                note("首片域 \(URL(string: playlist.segments[0])?.host ?? "?")")
 
                 let dir = cacheRoot.appendingPathComponent(movie.id, isDirectory: true)
                 let m3u8 = dir.appendingPathComponent("index.m3u8")
 
-                // 后台把整片拉下来（增量落盘 + 增量刷新 index.m3u8）
-                // 捕获的都是 Sendable：downloader 是 actor、playlist 是 struct、dir 是 URL
                 let task = Task.detached(priority: .userInitiated) {
                     _ = try? await downloader.download(playlist, to: dir,
                                                        referer: TxinEndpoint.base,
@@ -225,11 +227,11 @@ final class AppStore: ObservableObject {
                 }
                 cacheTask = task
 
-                // 等前两个分片到齐就起播
                 var ready = false
-                for _ in 0..<60 {
-                    if let n = Self.segmentCount(dir), n >= 2,
-                       FileManager.default.fileExists(atPath: m3u8.path) {
+                for tick in 0..<80 {
+                    let n = Self.segmentCount(dir) ?? 0
+                    if tick % 8 == 0 { note("已缓存 \(n)/\(playlist.segments.count) 片") }
+                    if n >= 2, FileManager.default.fileExists(atPath: m3u8.path) {
                         ready = true
                         break
                     }
@@ -237,11 +239,17 @@ final class AppStore: ObservableObject {
                 }
 
                 if ready {
+                    if let first = Self.firstSegmentHead(dir) {
+                        note("首片首字节 \(first) \(first == "0x47" ? "✓明文TS" : "✗异常")")
+                    }
+                    note("起播 (本地)")
                     playURL = m3u8
                     return
                 }
+                note("L\(idx + 1) 缓存超时")
                 lastError = "线路 \(link.name ?? "") 缓存超时"
             } catch {
+                note("L\(idx + 1) 失败 \(error.localizedDescription.prefix(40))")
                 lastError = "线路 \(link.name ?? "") \(error.localizedDescription)"
                 continue
             }
@@ -250,6 +258,15 @@ final class AppStore: ObservableObject {
         errorText = lastError.isEmpty ? "没有可用线路" : lastError
         playingTitle = nil
     }
+
+    private static func firstSegmentHead(_ dir: URL) -> String? {
+        let p = dir.appendingPathComponent("seg_0000.ts")
+        guard let h = try? FileHandle(forReadingFrom: p) else { return nil }
+        defer { try? h.close() }
+        guard let d = try? h.read(upToCount: 1), let b = d.first else { return nil }
+        return String(format: "0x%02x", b)
+    }
+
 
     private static func segmentCount(_ dir: URL) -> Int? {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return nil }
