@@ -127,6 +127,22 @@ struct DetailPane: View {
     }
 
     private func play(line: TxinPlayLink) {
+        // 已下载优先：本地文件不受 CDN 带宽影响
+        if let job = store.job(for: d_id()), job.phase == .done, let path = job.filePath,
+           FileManager.default.fileExists(atPath: path) {
+            if playingLine == "local" {
+                player?.pause(); player = nil; playingLine = nil
+                return
+            }
+            let asset = AVURLAsset(url: URL(fileURLWithPath: path),
+                                   options: ["AVURLAssetOutOfBandMIMETypeKey": "video/mp2t"])
+            let p = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+            player = p
+            playingLine = "local"
+            p.play()
+            return
+        }
+
         guard let raw = line.m3u8_url else { return }
         if playingLine == line.code {
             player?.pause()
@@ -148,6 +164,10 @@ struct DetailPane: View {
         player = p
         playingLine = line.code
         p.play()
+    }
+
+    private func d_id() -> String {
+        store.detail?.id ?? store.selectedMovie?.id ?? ""
     }
 }
 
