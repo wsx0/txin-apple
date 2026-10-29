@@ -51,6 +51,14 @@ jobs:
           xcode-select -p
           sw_vers
           uname -m
+          echo "--- CocoaPods ---"
+          if command -v pod >/dev/null 2>&1; then
+            pod --version
+          else
+            echo "自带 pod 不可用，现场装"
+            sudo gem install cocoapods --no-document
+            pod --version
+          fi
 
       # 这一步会现场生成 ios/TxinApp.xcodeproj 再校验
       - name: 生成并校验 Xcode 工程
@@ -61,6 +69,17 @@ jobs:
           ls -la ios/ | head
           test -f ios/TxinApp.xcodeproj/project.pbxproj && echo "✓ project.pbxproj 就位"
           test -f ios/TxinApp.xcodeproj/xcshareddata/xcschemes/Txin.xcscheme && echo "✓ shared scheme 就位"
+
+      # VLCKit 走 CocoaPods。必须放在「生成工程」之后 —— 否则生成器会覆盖 pod 注入的引用。
+      - name: 安装 VLCKit
+        working-directory: ${{ env.PROJ }}/ios
+        run: |
+          if [ -f Podfile ]; then
+            pod install --repo-update
+            ls -d TxinApp.xcworkspace && echo "✓ workspace 就位"
+          else
+            echo "没有 Podfile，跳过"
+          fi
 
       - name: 源码结构自查
         working-directory: ${{ env.PROJ }}
