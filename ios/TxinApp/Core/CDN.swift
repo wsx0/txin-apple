@@ -67,6 +67,29 @@ public enum TxinCDN {
         return out
     }
 
+    /// 改写整份 m3u8 里的所有 URL。
+    ///
+    /// 流播时播放器会直接请求 m3u8 里写的地址，根本不会经过 `rewrite(_:)` ——
+    /// 所以国内 DNS 把 whk.srslpoh.cn 劫持到 183.192.65.101 之后，
+    /// 播放器拿到的是那个 11545 字节的 HTML 拦截页（HTTP 还是 200），
+    /// 当成 TS 去解码必然失败，表现就是「播几秒就停」。
+    ///
+    /// m3u8 里要改的有两处：`#EXT-X-KEY` 的 URI（key 也在 whk 上）
+    /// 和每个分片行。直接按域名做全文字符串替换最稳，相对路径不用动。
+    public static func rewritePlaylist(_ text: String) -> String {
+        var out = text
+        for m in State.shared.mirrors {
+            out = out.replacingOccurrences(of: m.from, with: m.to)
+            // 也覆盖不带 scheme 的写法
+            let hostFrom = m.from.replacingOccurrences(of: "https://", with: "")
+            let hostTo = m.to.replacingOccurrences(of: "https://", with: "")
+            if !hostFrom.isEmpty {
+                out = out.replacingOccurrences(of: hostFrom, with: hostTo)
+            }
+        }
+        return out
+    }
+
     // MARK: - 探测
 
     /// 返回 true 表示国内域名可用（没被劫持）
