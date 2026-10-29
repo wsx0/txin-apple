@@ -61,6 +61,16 @@ final class AppStore: ObservableObject {
     @Published var playURL: URL?
 
     private var playTask: Task<Void, Never>?
+    /// 后台缓存整片的任务
+    private var cacheTask: Task<Void, Never>?
+
+    /// 播放缓存目录（分片 + 本地 m3u8）
+    var cacheRoot: URL {
+        let u = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("txin-play", isDirectory: true)
+        try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+        return u
+    }
 
     private(set) var client: TxinClient?
 
@@ -179,43 +189,58 @@ final class AppStore: ObservableObject {
             return
         }
 
+        // ── 方案：App 自己下载并解密分片，VLC 播本地明文 ──────────────
+        //
+        // 为什么不把远程 m3u8 直接交给播放器：
+        //   分片落在 whk.srslpoh.cn，国内部分网络会把它劫持到
+        //   183.192.65.101 并返回 11545 字节 HTML（状态码仍然 200），
+        //   播放器把这堆 HTML 当 TS 解码，播几秒就停。
+        //   换成 CloudFront 镜像能绕开，但用户侧到底通不通我没法验证。
+        //   唯一的确定性做法：请求和 AEC 解密都由 App 完成，
+        //   播放器只读本地已经解好的明文 TS。
+        //
+        // 用户感知仍是「点了就看」：缓存到第 2 个分片（约 8 秒）就开始播。
+
         var lastError = ""
 
         for link in links {
             guard let raw = link.m3u8_url else { continue }
             let full = raw.hasPrefix("http") ? raw : TxinEndpoint.current + raw
-            guard let url = URL(string: full) else { continue }
 
             do {
-                // 1) 自己把 m3u8 拉下来 —— 播放器直接播远程的话，它请求的是 m3u8 里
-                //    写的 whk.srslpoh.cn，那个域名在国内被 DNS 劫持到 183.192.65.101，
-                //    返回 11545 字节 HTML（状态码还是 200），播放器当 TS 解码就卡死。
-                var req = URLRequest(url: url)
-                req.timeoutInterval = 15
-                req.setValue(TxinClient.userAgent, forHTTPHeaderField: "User-Agent")
-                req.setValue(TxinEndpoint.base, forHTTPHeaderField: "Referer")
-                let (data, resp) = try await URLSession.shared.data(for: req)
+                let downloader = HLSDownloader(concurrency: 4)
+                let playlist = try await downloader.fetchPlaylist(m3u8: full,
+                                                                  referer: TxinEndpoint.base)
 
-                guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-                    lastError = "线路 \(link.name ?? "") HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)"
-                    continue
+                let dir = cacheRoot.appendingPathComponent(movie.id, isDirectory: true)
+                let m3u8 = dir.appendingPathComponent("index.m3u8")
+
+                // 后台把整片拉下来（增量落盘 + 增量刷新 index.m3u8）
+                // 捕获的都是 Sendable：downloader 是 actor、playlist 是 struct、dir 是 URL
+                let task = Task.detached(priority: .userInitiated) {
+                    _ = try? await downloader.download(playlist, to: dir,
+                                                       referer: TxinEndpoint.base,
+                                                       onProgress: nil,
+                                                       onState: nil)
                 }
-                let text = String(decoding: data, as: UTF8.self)
-                guard text.contains("#EXTM3U") else {
-                    lastError = "线路 \(link.name ?? "") 返回的不是播放列表（可能被劫持）"
-                    continue
+                cacheTask = task
+
+                // 等前两个分片到齐就起播
+                var ready = false
+                for _ in 0..<60 {
+                    if let n = Self.segmentCount(dir), n >= 2,
+                       FileManager.default.fileExists(atPath: m3u8.path) {
+                        ready = true
+                        break
+                    }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
                 }
 
-                // 2) 把所有 URL 改写到镜像（key 和每个分片都会一起改）
-                let rewritten = TxinCDN.rewritePlaylist(text)
-
-                // 3) 落到临时文件，让 VLC 播本地播放列表
-                let local = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("txin-\(movie.id)-\(link.code ?? "l").m3u8")
-                try rewritten.write(to: local, atomically: true, encoding: .utf8)
-
-                playURL = local
-                return
+                if ready {
+                    playURL = m3u8
+                    return
+                }
+                lastError = "线路 \(link.name ?? "") 缓存超时"
             } catch {
                 lastError = "线路 \(link.name ?? "") \(error.localizedDescription)"
                 continue
@@ -225,6 +250,12 @@ final class AppStore: ObservableObject {
         errorText = lastError.isEmpty ? "没有可用线路" : lastError
         playingTitle = nil
     }
+
+    private static func segmentCount(_ dir: URL) -> Int? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return nil }
+        return names.filter { $0.hasPrefix("seg_") && $0.hasSuffix(".ts") }.count
+    }
+
 
     /// 直接请求一次 m3u8，看是不是真的 #EXTM3U
     private static func probe(_ url: URL) async -> Bool {
@@ -240,6 +271,7 @@ final class AppStore: ObservableObject {
 
     func stopPlay() {
         playTask?.cancel()
+        cacheTask?.cancel()
         playURL = nil
         playingTitle = nil
     }
