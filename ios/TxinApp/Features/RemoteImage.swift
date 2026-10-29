@@ -9,8 +9,6 @@
 
 import SwiftUI
 import UIKit
-import TxinKit
-
 // MARK: - 内存缓存
 
 final class ImageCache {
