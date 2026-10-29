@@ -17,6 +17,8 @@ set -eu
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 PROJ="$ROOT/ios/TxinApp.xcodeproj"
+PODFILE="$ROOT/ios/Podfile"
+WS="$ROOT/ios/TxinApp.xcworkspace"
 SCHEME="Txin"
 CONFIG="Release"
 VERSION="1.0.0"
@@ -54,11 +56,24 @@ fi
 
 mkdir -p "$OUT"
 
+# ---------- 0.5 CocoaPods ----------
+# 顺序很重要：先由生成器产出 project.pbxproj，再 pod install 往里面注入 Pods 引用。
+# 反过来做的话，生成器会把 pod 的改动覆盖掉。
+BUILD_REF=(-project "$PROJ")
+if [ -f "$PODFILE" ]; then
+  command -v pod >/dev/null 2>&1 || die "找不到 pod。先装 CocoaPods：sudo gem install cocoapods"
+  say "pod install（会下载 VLCKit，首次约 200MB）…"
+  ( cd "$ROOT/ios" && pod install --repo-update 2>&1 | tail -25 ) || die "pod install 失败"
+  [ -d "$WS" ] || die "pod install 没生成 workspace：$WS"
+  BUILD_REF=(-workspace "$WS")
+  say "改用 workspace 构建：$(basename "$WS")"
+fi
+
 # ---------- 1. 未签名 ----------
 if [ "$MODE" = "unsigned" ]; then
   say "编译（不签名）…"
   xcodebuild \
-    -project "$PROJ" \
+    "${BUILD_REF[@]}" \
     -scheme "$SCHEME" \
     -configuration "$CONFIG" \
     -sdk iphoneos \
@@ -67,7 +82,7 @@ if [ "$MODE" = "unsigned" ]; then
     CODE_SIGNING_REQUIRED=NO \
     CODE_SIGN_IDENTITY="" \
     CODE_SIGN_ENTITLEMENTS="" \
-    clean build 2>&1 | grep -E "error:|warning: .*(deprecated|unused)|BUILD (SUCCEEDED|FAILED)|\*\* " | head -60 || true
+    clean build 2>&1 | grep -E "error:|warning: .*(deprecated|unused)|BUILD (SUCCEEDED|FAILED)|\*\* " | head -80 || true
 
   APP="$OUT/dd/Build/Products/$CONFIG-iphoneos/Txin.app"
   [ -d "$APP" ] || die "没找到产物：$APP"
@@ -122,7 +137,7 @@ if [ "$MODE" = "device" ]; then
   say "直接装到连接的设备…"
   DEV=$(xcrun devicectl list devices 2>/dev/null | grep -i "connected" | head -1 | awk '{print $1}')
   [ -n "$DEV" ] || die "没找到已连接的设备（解锁手机、信任此电脑）"
-  xcodebuild -project "$PROJ" -scheme "$SCHEME" -configuration "$CONFIG" \
+  xcodebuild "${BUILD_REF[@]}" -scheme "$SCHEME" -configuration "$CONFIG" \
     -destination "id=$DEV" \
     DEVELOPMENT_TEAM="$TEAM" \
     CODE_SIGN_STYLE=Automatic \
@@ -135,7 +150,7 @@ say "归档（archive）…"
 ARCH="$OUT/Txin.xcarchive"
 rm -rf "$ARCH"
 xcodebuild \
-  -project "$PROJ" \
+  "${BUILD_REF[@]}" \
   -scheme "$SCHEME" \
   -configuration "$CONFIG" \
   -sdk iphoneos \
