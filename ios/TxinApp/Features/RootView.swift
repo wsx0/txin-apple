@@ -34,6 +34,7 @@ struct RootView: View {
             VLCPlayerScreen(url: box.url, title: box.title) {
                 store.stopPlay()
             }
+            .environmentObject(store)
         }
         .overlay {
             if store.playingTitle != nil && store.playURL == nil {
