@@ -2,11 +2,10 @@
 //  RootView.swift
 //  Txin （iOS）
 //
-//  极简形态：首页点卡片 -> 直接全屏播。没有详情页、没有线路选择、没有下载流程。
+//  极简形态：首页点卡片 -> 直接全屏播。播放内核是 VLCKit（libVLC + FFmpeg）。
 //
 
 import SwiftUI
-import AVKit
 
 struct RootView: View {
     @EnvironmentObject private var store: AppStore
@@ -27,24 +26,26 @@ struct RootView: View {
                 .tag(2)
         }
         .tint(.pink)
-        // 点卡片 -> store.playerItem 被赋值 -> 这里直接全屏起播
+        // 点卡片 -> store.playURL 被赋值 -> 全屏起 VLC
         .fullScreenCover(item: Binding(
-            get: { store.playerItem.map { PlayBox(item: $0, title: store.playingTitle ?? "") } },
+            get: { store.playURL.map { PlayBox(url: $0, title: store.playingTitle ?? "") } },
             set: { if $0 == nil { store.stopPlay() } }
         )) { box in
-            FullPlayer(item: box.item, title: box.title) {
+            VLCPlayerScreen(url: box.url, title: box.title) {
                 store.stopPlay()
             }
         }
         .overlay {
-            if store.playingTitle != nil && store.playerItem == nil {
+            if store.playingTitle != nil && store.playURL == nil {
                 ZStack {
-                    Color.black.opacity(0.75).ignoresSafeArea()
-                    VStack(spacing: 12) {
+                    Color.black.opacity(0.78).ignoresSafeArea()
+                    VStack(spacing: 14) {
                         ProgressView().tint(.white)
                         Text(store.playingTitle ?? "")
                             .font(.footnote)
                             .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 30)
                         Button("取消") { store.stopPlay() }
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.7))
@@ -65,59 +66,7 @@ struct RootView: View {
 // MARK: - fullScreenCover 的 Identifiable 包装
 
 struct PlayBox: Identifiable {
-    let item: AVPlayerItem
+    let url: URL
     let title: String
-    var id: ObjectIdentifier { ObjectIdentifier(item) }
-}
-
-// MARK: - 全屏播放器
-
-struct FullPlayer: UIViewControllerRepresentable {
-    let item: AVPlayerItem
-    let title: String
-    let onClose: () -> Void
-
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        let vc = AVPlayerViewController()
-        let player = AVPlayer(playerItem: item)
-        player.automaticallyWaitsToMinimizeStalling = true
-        vc.player = player
-        vc.showsPlaybackControls = true
-        vc.allowsPictureInPicturePlayback = true
-        vc.entersFullScreenWhenPlaybackBegins = false
-
-        // 卡住时给一句提示，别让用户以为死了
-        context.coordinator.observe(item, vc: vc)
-
-        player.play()
-        context.coordinator.player = player
-        return vc
-    }
-
-    func updateUIViewController(_ vc: AVPlayerViewController, context: Context) {}
-
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    final class Coordinator {
-        var player: AVPlayer?
-        private var tokens: [NSObjectProtocol] = []
-
-        func observe(_ item: AVPlayerItem, vc: AVPlayerViewController) {
-            let c = NotificationCenter.default
-            tokens.append(c.addObserver(forName: AVPlayerItem.playbackStalledNotification,
-                                        object: item, queue: .main) { _ in
-                vc.player?.play()      // 卡住就再推一把
-            })
-            tokens.append(c.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime,
-                                        object: item, queue: .main) { n in
-                if let e = n.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error {
-                    print("[txin] 播放失败: \(e)")
-                }
-            })
-        }
-
-        deinit {
-            tokens.forEach { NotificationCenter.default.removeObserver($0) }
-        }
-    }
+    var id: String { url.absoluteString + title }
 }
