@@ -295,16 +295,24 @@ public actor HLSDownloader {
         }
 
         // 6) 重新封装成 mp4。
-        //    为什么必须做：HLS 分片拼接出来的 .ts 里，每个分片都带自己的 SPS/PPS，
-        //    ffprobe 会看到「两条 h264 流」，AVPlayer 遇到这种文件常常只播第一条流的开头。
-        //    passthrough 封装不重编码，很快，纯粹重排容器。
+        //    为什么必须做：分片拼接出来的 .ts 里有多套 PAT/PMT program 声明，
+        //    AVPlayer 遇到这种文件常常只认第一个 program —— 也就是开头几秒。
+        //    先建 composition 只取首路，再 passthrough 封装；失败或截断就重编码。
         onState?("重新封装为 mp4…")
         let mp4 = dir.appendingPathComponent("video.mp4")
-        if (try? await remuxToMp4(merged, to: mp4)) != nil {
+        do {
+            try await remuxToMp4(merged, to: mp4)
+            try? "ok".write(to: dir.appendingPathComponent("remux-error.txt"),
+                            atomically: true, encoding: .utf8)
             return mp4
+        } catch {
+            // 失败原因落盘，App 的诊断面板会显示它
+            let msg = "\(error)"
+            try? msg.write(to: dir.appendingPathComponent("remux-error.txt"),
+                           atomically: true, encoding: .utf8)
+            onState?("remux 失败，退回 ts")
+            return merged
         }
-        // remux 失败就退回 ts（老的播放路径还能凑合）
-        return merged
     }
 
     // MARK: - remux
