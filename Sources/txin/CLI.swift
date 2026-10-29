@@ -243,16 +243,16 @@ struct TxinCLI {
         m3u8 : \(m3u8)
         """)
 
-        let full = m3u8.hasPrefix("http") ? m3u8 : TxinClient.defaultHost + m3u8
+        let full = m3u8.hasPrefix("http") ? m3u8 : TxinEndpoint.current + m3u8
         let dl = HLSDownloader()
         print("拉取播放列表…")
-        let playlist = try await dl.fetchPlaylist(m3u8: full, referer: TxinClient.defaultHost + "/")
+        let playlist = try await dl.fetchPlaylist(m3u8: full, referer: TxinEndpoint.base)
         print("分片 \(playlist.segments.count)  加密 \(playlist.key != nil ? playlist.key!.method : "无")  IV \(playlist.key?.iv.map { TxinCrypto.bytesToHex($0) } ?? "-")")
 
         let dir = URL(fileURLWithPath: outDir).appendingPathComponent(id)
         // 进度直接打：onProgress 是 @Sendable 闭包，不能捕获并修改外部 var（Swift 6 并发检查）
         // 用 \r 覆盖同一行，重复打印同一百分比也无害
-        let merged = try await dl.download(playlist, to: dir, referer: TxinClient.defaultHost + "/",
+        let merged = try await dl.download(playlist, to: dir, referer: TxinEndpoint.base,
             onProgress: { p in
                 let pct = Int(p.fraction * 100)
                 let mb = Double(p.bytes) / 1_048_576
