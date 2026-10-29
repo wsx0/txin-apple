@@ -22,8 +22,13 @@ public struct HLSPlaylist: Sendable {
     public let url: String
     public let key: HLSKey?
     public let segments: [String]
+    /// 每个分片的时长（对应 EXTINF），生成本地播放列表要用
+    public let durations: [Double]
     public let targetDuration: Int?
     public let mediaSequence: Int
+
+    /// 分片总时长（秒）
+    public var totalDuration: Double { durations.reduce(0, +) }
 }
 
 public enum HLSError: Error, CustomStringConvertible {
@@ -49,6 +54,8 @@ public enum HLSParser {
             throw HLSError.badPlaylist("缺少 #EXTM3U")
         }
         var segments: [String] = []
+        var durations: [Double] = []
+        var pendingDuration: Double = 0
         var key: HLSKey?
         var target: Int?
         var mediaSeq = 0
@@ -61,6 +68,11 @@ public enum HLSParser {
                 target = Int(line.dropFirst("#EXT-X-TARGETDURATION:".count))
             } else if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
                 mediaSeq = Int(line.dropFirst("#EXT-X-MEDIA-SEQUENCE:".count)) ?? 0
+            } else if line.hasPrefix("#EXTINF:") {
+                // #EXTINF:4.833333,  或带标题 #EXTINF:4.833333,标题
+                let body = line.dropFirst("#EXTINF:".count)
+                let numPart = body.split(separator: ",", maxSplits: 1).first ?? ""
+                pendingDuration = Double(numPart.trimmingCharacters(in: .whitespaces)) ?? 0
             } else if line.hasPrefix("#EXT-X-KEY:") {
                 let attrs = parseAttributes(String(line.dropFirst("#EXT-X-KEY:".count)))
                 let method = attrs["METHOD"] ?? "NONE"
@@ -78,6 +90,8 @@ public enum HLSParser {
             } else if !line.hasPrefix("#") {
                 let absolute = URL(string: line, relativeTo: baseURL)?.absoluteString ?? line
                 segments.append(TxinCDN.rewrite(absolute) ?? absolute)
+                durations.append(pendingDuration)
+                pendingDuration = 0
             }
         }
 
@@ -85,6 +99,7 @@ public enum HLSParser {
         return HLSPlaylist(url: baseURL.absoluteString,
                            key: key,
                            segments: segments,
+                           durations: durations,
                            targetDuration: target,
                            mediaSequence: mediaSeq)
     }
@@ -240,7 +255,35 @@ public actor HLSDownloader {
             }
         }
 
-        // 3) 合并
+        // 3) 把解好密的分片逐个落盘（保留，后面要用）
+        onState?("写入分片…")
+        for (i, buf) in buffers.enumerated() {
+            guard let buf else { continue }
+            let segURL = dir.appendingPathComponent(String(format: "seg_%04d.ts", i))
+            try Data(buf).write(to: segURL)
+        }
+
+        // 4) 生成本地 HLS 播放列表 —— 这一步是关键。
+        //    AVPlayer 对「裸 .ts 文件」支持不稳（常见症状：只播开头几秒就停），
+        //    但对「本地 m3u8 + 同目录分片」是原生支持的，等同于流播体验。
+        onState?("生成本地播放列表…")
+        let targetDur = playlist.targetDuration ?? 5
+        var m3u8 = "#EXTM3U\n"
+        m3u8 += "#EXT-X-VERSION:3\n"
+        m3u8 += "#EXT-X-TARGETDURATION:\(targetDur)\n"
+        m3u8 += "#EXT-X-MEDIA-SEQUENCE:0\n"
+        m3u8 += "#EXT-X-PLAYLIST-TYPE:VOD\n"
+        for (i, d) in playlist.durations.enumerated() where i < buffers.count {
+            // 时长缺失时给个保守值，别写 0（0 会让播放器直接跳过）
+            let dur = d > 0 ? d : Double(targetDur)
+            m3u8 += "#EXTINF:" + String(format: "%.6f", dur) + ",\n"
+            m3u8 += String(format: "seg_%04d.ts\n", i)
+        }
+        m3u8 += "#EXT-X-ENDLIST\n"
+        try m3u8.write(to: dir.appendingPathComponent("index.m3u8"),
+                       atomically: true, encoding: .utf8)
+
+        // 5) 再合并一份整片，给「导出 / 分享」用
         onState?("合并分片…")
         let merged = dir.appendingPathComponent("merged.ts")
         FileManager.default.createFile(atPath: merged.path, contents: nil)
@@ -249,8 +292,6 @@ public actor HLSDownloader {
         for buf in buffers {
             if let buf { try handle.write(contentsOf: Data(buf)) }
         }
-        // 分片单独留一份没必要
-        _ = dir
         return merged
     }
 
