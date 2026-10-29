@@ -135,6 +135,18 @@ struct DetailPane: View {
             return p
         }()
 
+        // 0) 下载后已 remux 成 mp4 —— AVPlayer 对它支持最完整
+        if let p = donePath, (p as NSString).pathExtension.lowercased() == "mp4" {
+            if playingLine == "local" {
+                player?.pause(); player = nil; playingLine = nil
+                return
+            }
+            player = AVPlayer(url: URL(fileURLWithPath: p))
+            playingLine = "local"
+            player?.play()
+            return
+        }
+
         // 1) 本地 HLS 播放列表优先 —— 裸 .ts 只播开头的问题是 AVPlayer 的老毛病
         if let p = donePath {
             let m3u8 = URL(fileURLWithPath: p).deletingLastPathComponent()
