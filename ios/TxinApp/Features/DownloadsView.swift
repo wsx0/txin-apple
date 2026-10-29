@@ -138,12 +138,22 @@ struct DiagnoseSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var rows: [FileRow] = []
     @State private var summary: String = ""
+    @State private var mediaInfo: [MediaInfo] = []
 
     struct FileRow: Identifiable {
         let id = UUID()
         let name: String
         let bytes: Int64
         let note: String
+    }
+
+    struct MediaInfo: Identifiable {
+        let id = UUID()
+        let name: String
+        let duration: String
+        let tracks: String
+        let verdict: String
+        let ok: Bool
     }
 
     var body: some View {
@@ -154,6 +164,29 @@ struct DiagnoseSheet: View {
                     row("说明", job.note.isEmpty ? "-" : job.note)
                     row("进度", "\(job.done)/\(job.total)")
                     row("大小", job.sizeText)
+                }
+
+                // 决定性诊断：文件自己报的时长和轨道数
+                Section("媒体探针") {
+                    if mediaInfo.isEmpty {
+                        Text("扫描中…").foregroundStyle(.secondary)
+                    }
+                    ForEach(mediaInfo) { m in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(m.name).font(.footnote.monospaced())
+                                Spacer()
+                                Text(m.ok ? "OK" : "异常")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(m.ok ? .green : .red)
+                            }
+                            Text("时长 \(m.duration)   轨道 \(m.tracks)")
+                                .font(.system(size: 11))
+                            Text(m.verdict)
+                                .font(.system(size: 10))
+                                .foregroundStyle(m.ok ? .secondary : .orange)
+                        }
+                    }
                 }
 
                 Section("目录内容 \(summary)") {
@@ -186,7 +219,7 @@ struct DiagnoseSheet: View {
                     .disabled(job.phase != .done)
 
                     Button {
-                        scan()
+                        Task { await scan() }
                     } label: {
                         Label("重新扫描", systemImage: "arrow.clockwise")
                     }
@@ -199,11 +232,13 @@ struct DiagnoseSheet: View {
                     Button("完成") { dismiss() }
                 }
             }
-            .task { scan() }
+            .task { await scan() }
         }
     }
 
-    private func scan() {
+    // MARK: - 扫描
+
+    private func scan() async {
         guard let path = job.filePath else { rows = []; return }
         let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
         let fm = FileManager.default
@@ -237,7 +272,6 @@ struct DiagnoseSheet: View {
                                bytes: segBytes,
                                note: "解密后的分片"))
         }
-        // remux 失败原因（成功时里面写的是 "ok"）
         let errFile = dir.appendingPathComponent("remux-error.txt")
         if let txt = try? String(contentsOf: errFile, encoding: .utf8) {
             out.append(FileRow(name: "remux-error.txt",
@@ -246,6 +280,48 @@ struct DiagnoseSheet: View {
         }
         rows = out
         summary = "(\(names.count) 个文件)"
+
+        // 探针：对每个媒体文件读真实 info
+        var infos: [MediaInfo] = []
+        for n in names.sorted() {
+            guard n.hasSuffix(".mp4") || n.hasSuffix(".ts") || n.hasPrefix("seg_0000") else { continue }
+            let u = dir.appendingPathComponent(n)
+            infos.append(await probe(u, name: n))
+        }
+        // 播放列表也探一下（AVURLAsset 能读 HLS 时长）
+        let m3u8 = dir.appendingPathComponent("index.m3u8")
+        if fm.fileExists(atPath: m3u8.path) {
+            infos.append(await probe(m3u8, name: "index.m3u8"))
+        }
+        mediaInfo = infos
+    }
+
+    private func probe(_ url: URL, name: String) async -> MediaInfo {
+        let asset = AVURLAsset(url: url)
+        var durText = "?"
+        var trackText = "?"
+        var verdict = ""
+        var ok = false
+        do {
+            let dur = try await asset.load(.duration).seconds
+            durText = String(format: "%.1f s", dur)
+            let v = (try? await asset.loadTracks(withMediaType: .video))?.count ?? 0
+            let a = (try? await asset.loadTracks(withMediaType: .audio))?.count ?? 0
+            trackText = "v\(v)/a\(a)"
+            // 判定：时长 > 60 秒且轨道正常
+            if dur.isFinite && dur > 60 && v >= 1 {
+                ok = true
+                verdict = "时长和轨道都正常 —— 播放器只播几秒的话，问题在播放侧"
+            } else if dur.isFinite && dur > 0 {
+                verdict = "时长只有 \(String(format: "%.1f", dur)) 秒 —— 文件本身被截断了"
+            } else {
+                verdict = "读不出时长 —— 容器结构有问题"
+            }
+        } catch {
+            verdict = "探针失败: \(error)"
+        }
+        return MediaInfo(name: name, duration: durText, tracks: trackText,
+                         verdict: verdict, ok: ok)
     }
 
     private func fmt(_ b: Int64) -> String {
