@@ -96,9 +96,9 @@ struct DetailView: View {
         let links = detail?.play_links ?? []
         return Group {
             if !links.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 8) {
                     if localFile != nil {
-                        // 已下载：只给一个"播放本地视频"入口，不走网络
+                        // 全部下完
                         HStack(spacing: 6) {
                             Label("本地文件", systemImage: "internaldrive.fill")
                                 .font(.system(size: 10))
@@ -123,18 +123,64 @@ struct DetailView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(playingLine == "local" ? .red : .green)
-                    } else {
-                        // 没下载：不提供流播入口。
-                        // CDN 带宽不稳时直接流播必然中途断，与其让人误点，不如不给。
+
+                    } else if let job = job, downloadedSegments > 0 {
+                        // 下载中：可以立刻边下边播
                         HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.orange)
-                            Text("要先下载才能播放 —— CDN 流播在手机网络上撑不住")
+                            ProgressView().controlSize(.mini)
+                            Text("已缓存 \(downloadedSegments)/\(max(job.total, 1)) 片")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                         }
-                        .padding(.vertical, 4)
+                        Button {
+                            play(line: links[0])
+                        } label: {
+                            HStack {
+                                Image(systemName: playingLine == "local"
+                                      ? "stop.circle.fill" : "play.circle.fill")
+                                Text(playingLine == "local" ? "停止" : "边下边播")
+                                Spacer()
+                            }
+                            .font(.footnote)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(playingLine == "local" ? .red : .orange)
+
+                    } else if let job = job {
+                        // 刚点下载，还没拿到第一个分片
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text(job.phase.rawValue)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+
+                    } else {
+                        // 还没开始：一个按钮搞定「开始缓存 + 立即播放」
+                        Button {
+                            Task {
+                                await store.startDownload(id: movie.id, title: movie.name ?? movie.id)
+                                // 等第一个分片落盘就给播放器
+                                for _ in 0..<40 {
+                                    try? await Task.sleep(nanoseconds: 250_000_000)
+                                    if downloadedSegments >= 2 { break }
+                                }
+                                play(line: links[0])
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "play.circle.fill")
+                                Text("边下边播")
+                                Spacer()
+                            }
+                            .font(.footnote)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.pink)
+
+                        Text("先缓存两三个分片就开始播，后面边下边拉，不用等整片下完。")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
                     }
                 }
             }
@@ -197,11 +243,21 @@ struct DetailView: View {
         return URL(fileURLWithPath: path)
     }
 
-    /// 下载目录里的本地 HLS 播放列表 —— 比裸 .ts 稳得多
+    /// 本地 HLS 播放列表。
+    /// 注意：这里**不看 job.phase**，只要文件存在就返回 —— 因为要支持边下边播，
+    /// 下载中的分片是连续落盘的，m3u8 也在增量刷新。
     private var localPlaylist: URL? {
-        guard let f = localFile else { return nil }
-        let m3u8 = f.deletingLastPathComponent().appendingPathComponent("index.m3u8")
+        let m3u8 = store.downloadRoot
+            .appendingPathComponent(movie.id, isDirectory: true)
+            .appendingPathComponent("index.m3u8")
         return FileManager.default.fileExists(atPath: m3u8.path) ? m3u8 : nil
+    }
+
+    /// 已经落盘的分片数
+    private var downloadedSegments: Int {
+        let d = store.downloadRoot.appendingPathComponent(movie.id, isDirectory: true)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: d.path) else { return 0 }
+        return names.filter { $0.hasPrefix("seg_") && $0.hasSuffix(".ts") }.count
     }
 
     private func play(line: TxinPlayLink) {
@@ -210,9 +266,7 @@ struct DetailView: View {
             return
         }
 
-        // 1) 本地 HLS 播放列表永远排第一。
-        //    分片是解密后的明文，AVPlayer 按 m3u8 逐片读，每片独立解析，
-        //    不会碰「多个 PAT/PMT program」那个坑 —— 这是目前最稳的播放路径。
+        // 1) 本地 HLS 播放列表（下载中也能播，播到未下载的分片会自己等）
         if let pl = localPlaylist {
             player = AVPlayer(url: pl)
             playingLine = "local"
@@ -220,7 +274,7 @@ struct DetailView: View {
             return
         }
 
-        // 2) mp4（remux 通过时长校验才会存在）
+        // 2) mp4
         if let f = localFile, f.pathExtension.lowercased() == "mp4" {
             player = AVPlayer(url: f)
             playingLine = "local"
@@ -228,7 +282,7 @@ struct DetailView: View {
             return
         }
 
-        // 3) 只剩整片 .ts（老版本下载的）
+        // 3) 整片 ts（老版本）
         if let local = localFile {
             let asset = AVURLAsset(url: local, options: [
                 "AVURLAssetOutOfBandMIMETypeKey": "video/mp2t",
@@ -240,7 +294,7 @@ struct DetailView: View {
             return
         }
 
-        // 4) 没下载才走远程流播
+        // 4) 远程流播
         guard let raw = line.m3u8_url else { return }
         if playingLine == line.code {
             player?.pause(); player = nil; playingLine = nil
