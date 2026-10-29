@@ -185,6 +185,9 @@ public actor HLSDownloader {
     public func download(_ playlist: HLSPlaylist,
                          to directory: URL,
                          referer: String,
+                         // 播本地 m3u8 时不需要 mp4，跳过 remux 能立刻起播。
+                         // remux 只对「导出/分享单文件」有用。
+                         skipRemux: Bool = false,
                          onProgress: (@Sendable (HLSDownloadProgress) -> Void)? = nil,
                          onState: (@Sendable (String) -> Void)? = nil) async throws -> URL {
 
@@ -307,6 +310,11 @@ public actor HLSDownloader {
 
         // 全部分片到齐 -> 补 ENDLIST，转成 VOD（可以拖进度条）
         writePlaylist(ended: true)
+
+        // 播放只需要 index.m3u8 + 明文分片，remux 到此为止
+        if skipRemux {
+            return dir.appendingPathComponent("index.m3u8")
+        }
 
         // 5) 合并一份整片，给「导出 / 分享」和 remux 用
         onState?("合并分片…")
