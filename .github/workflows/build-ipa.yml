@@ -30,16 +30,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # .xcodeproj 是生成物，故意不进 git（.gitignore 里挡着），
+      # 所以这里不能拿 project.pbxproj 判断根目录 —— 那样永远找不到。
+      # 用生成器脚本来判断。
       - name: 定位工程根
         run: |
-          if [ -f apple/ios/TxinApp.xcodeproj/project.pbxproj ]; then
+          if [ -f apple/tools/gen_ios_xcodeproj.py ]; then
             echo "PROJ=apple" >> "$GITHUB_ENV"
-          elif [ -f ios/TxinApp.xcodeproj/project.pbxproj ]; then
+          elif [ -f tools/gen_ios_xcodeproj.py ]; then
             echo "PROJ=." >> "$GITHUB_ENV"
           else
-            echo "::error::没找到 ios/TxinApp.xcodeproj"
+            echo "::error::没找到 tools/gen_ios_xcodeproj.py"
             exit 1
           fi
+          echo "工程根 = $PROJ"
 
       - name: 工具链
         run: |
@@ -48,10 +52,15 @@ jobs:
           sw_vers
           uname -m
 
-      - name: 重新生成 Xcode 工程并校验
+      # 这一步会现场生成 ios/TxinApp.xcodeproj 再校验
+      - name: 生成并校验 Xcode 工程
         working-directory: ${{ env.PROJ }}
         run: |
           python3 tools/gen_ios_xcodeproj.py --verify
+          echo "--- 生成结果 ---"
+          ls -la ios/ | head
+          test -f ios/TxinApp.xcodeproj/project.pbxproj && echo "✓ project.pbxproj 就位"
+          test -f ios/TxinApp.xcodeproj/xcshareddata/xcschemes/Txin.xcscheme && echo "✓ shared scheme 就位"
 
       - name: 源码结构自查
         working-directory: ${{ env.PROJ }}
