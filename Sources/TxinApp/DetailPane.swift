@@ -138,13 +138,13 @@ struct DetailPane: View {
             playingLine = nil
             return
         }
-        let full = raw.hasPrefix("http") ? raw : TxinClient.defaultHost + raw
+        let full = raw.hasPrefix("http") ? raw : TxinEndpoint.current + raw
         guard let url = URL(string: full) else { return }
 
         let asset = AVURLAsset(url: url, options: [
             "AVURLAssetHTTPHeaderFieldsKey": [
                 "User-Agent": TxinClient.userAgent,
-                "Referer": TxinClient.defaultHost + "/",
+                "Referer": TxinEndpoint.base,
             ],
         ])
         let item = AVPlayerItem(asset: asset)
