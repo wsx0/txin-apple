@@ -120,17 +120,37 @@ public enum TxinCrypto {
         var out = [UInt8](repeating: 0, count: outCapacity)
         var outLength: size_t = 0
 
-        let status: CCCryptorStatus = key.withUnsafeBytes { keyPtr -> CCCryptorStatus in
-            data.withUnsafeBytes { dataPtr -> CCCryptorStatus in
-                let ivPtr = iv?.withUnsafeBytes { $0.baseAddress }
-                return CCCrypt(op,
-                               CCAlgorithm(kCCAlgorithmAES),
-                               options,
-                               keyPtr.baseAddress, key.count,
-                               ivPtr,
-                               dataPtr.baseAddress, data.count,
-                               &out, outCapacity,
-                               &outLength)
+        // 注意：iv 的指针必须 alive 到 CCCrypt 调用结束。
+        // 以前的写法是
+        //     let ivPtr = iv?.withUnsafeBytes { $0.baseAddress }
+        //     CCCrypt(..., ivPtr, ...)
+        // 闭包一返回指针就悬垂了，属于未定义行为 —— 表现为解密"有时成功有时失败"，
+        // HLS 分片则一律失败并被 ?? data 静默吞掉，把密文写进了文件。
+        let status: CCCryptorStatus = key.withUnsafeBytes { keyBuf -> CCCryptorStatus in
+            data.withUnsafeBytes { dataBuf -> CCCryptorStatus in
+                let keyBase = keyBuf.baseAddress
+                let dataBase = dataBuf.baseAddress
+                if let iv {
+                    return iv.withUnsafeBytes { ivBuf in
+                        CCCrypt(op,
+                                CCAlgorithm(kCCAlgorithmAES),
+                                options,
+                                keyBase, key.count,
+                                ivBuf.baseAddress,
+                                dataBase, data.count,
+                                &out, outCapacity,
+                                &outLength)
+                    }
+                } else {
+                    return CCCrypt(op,
+                                   CCAlgorithm(kCCAlgorithmAES),
+                                   options,
+                                   keyBase, key.count,
+                                   nil,
+                                   dataBase, data.count,
+                                   &out, outCapacity,
+                                   &outLength)
+                }
             }
         }
         guard status == kCCSuccess else { throw TxinCryptoError.cryptFailed(Int32(status)) }
