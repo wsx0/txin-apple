@@ -189,6 +189,7 @@ public actor HLSDownloader {
                          onState: (@Sendable (String) -> Void)? = nil) async throws -> URL {
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dir = directory
 
         // 1) 密钥
         var aesKey: [UInt8]?
@@ -211,12 +212,39 @@ public actor HLSDownloader {
 
         let total = playlist.segments.count
         let iv = playlist.key?.iv ?? [UInt8](repeating: 0, count: 16)
+        let targetDur = playlist.targetDuration ?? 5
+
+        // 增量写盘 + 增量更新播放列表，实现「边下边播」：
+        //   每解好一个分片就立刻落盘，并重写 index.m3u8（EVENT 类型、不带 ENDLIST）。
+        //   AVPlayer 遇到没有 ENDLIST 的播放列表会当直播流处理，未到的分片自己等，
+        //   所以下载进度 3~5 个分片时就能开始播，不用等完整片子。
+        let m3u8URL = dir.appendingPathComponent("index.m3u8")
+
+        func writePlaylist(ended: Bool) {
+            var text = "#EXTM3U\n"
+            text += "#EXT-X-VERSION:3\n"
+            text += "#EXT-X-TARGETDURATION:\(targetDur)\n"
+            text += "#EXT-X-MEDIA-SEQUENCE:0\n"
+            text += ended ? "#EXT-X-PLAYLIST-TYPE:VOD\n" : "#EXT-X-PLAYLIST-TYPE:EVENT\n"
+            for (i, d) in playlist.durations.enumerated() {
+                guard FileManager.default.fileExists(
+                    atPath: dir.appendingPathComponent(String(format: "seg_%04d.ts", i)).path) else {
+                    break        // 只写连续已落盘的部分
+                }
+                let dur = d > 0 ? d : Double(targetDur)
+                text += "#EXTINF:" + String(format: "%.6f", dur) + ",\n"
+                text += String(format: "seg_%04d.ts\n", i)
+            }
+            if ended { text += "#EXT-X-ENDLIST\n" }
+            try? text.write(to: m3u8URL, atomically: true, encoding: .utf8)
+        }
+
+        // 先把空播放列表写出来，播放器可以立刻打开（会等待分片）
+        writePlaylist(ended: false)
 
         // 2) 分片（有界并发，保持顺序写盘）
-        let dir = directory
-        var buffers = [[UInt8]?](repeating: nil, count: total)
-        var bytes: Int64 = 0
         var done = 0
+        var bytes: Int64 = 0
 
         try await withThrowingTaskGroup(of: (Int, [UInt8]).self) { group in
             var next = 0
@@ -239,10 +267,15 @@ public actor HLSDownloader {
                 } else {
                     plain = data
                 }
-                buffers[idx] = plain
+                let segURL = dir.appendingPathComponent(String(format: "seg_%04d.ts", idx))
+                try Data(plain).write(to: segURL)
+
                 bytes += Int64(plain.count)
                 done += 1
                 onProgress?(HLSDownloadProgress(done: done, total: total, bytes: bytes))
+
+                // 每落盘一个就刷新播放列表（成本很低，就是拼个字符串）
+                writePlaylist(ended: false)
 
                 if next < total {
                     let idx2 = next
@@ -256,42 +289,19 @@ public actor HLSDownloader {
             }
         }
 
-        // 3) 把解好密的分片逐个落盘（保留，后面要用）
-        onState?("写入分片…")
-        for (i, buf) in buffers.enumerated() {
-            guard let buf else { continue }
-            let segURL = dir.appendingPathComponent(String(format: "seg_%04d.ts", i))
-            try Data(buf).write(to: segURL)
-        }
+        // 全部分片到齐 -> 补 ENDLIST，转成 VOD（可以拖进度条）
+        writePlaylist(ended: true)
 
-        // 4) 生成本地 HLS 播放列表 —— 这一步是关键。
-        //    AVPlayer 对「裸 .ts 文件」支持不稳（常见症状：只播开头几秒就停），
-        //    但对「本地 m3u8 + 同目录分片」是原生支持的，等同于流播体验。
-        onState?("生成本地播放列表…")
-        let targetDur = playlist.targetDuration ?? 5
-        var m3u8 = "#EXTM3U\n"
-        m3u8 += "#EXT-X-VERSION:3\n"
-        m3u8 += "#EXT-X-TARGETDURATION:\(targetDur)\n"
-        m3u8 += "#EXT-X-MEDIA-SEQUENCE:0\n"
-        m3u8 += "#EXT-X-PLAYLIST-TYPE:VOD\n"
-        for (i, d) in playlist.durations.enumerated() where i < buffers.count {
-            // 时长缺失时给个保守值，别写 0（0 会让播放器直接跳过）
-            let dur = d > 0 ? d : Double(targetDur)
-            m3u8 += "#EXTINF:" + String(format: "%.6f", dur) + ",\n"
-            m3u8 += String(format: "seg_%04d.ts\n", i)
-        }
-        m3u8 += "#EXT-X-ENDLIST\n"
-        try m3u8.write(to: dir.appendingPathComponent("index.m3u8"),
-                       atomically: true, encoding: .utf8)
-
-        // 5) 再合并一份整片，给「导出 / 分享」用
+        // 5) 合并一份整片，给「导出 / 分享」和 remux 用
         onState?("合并分片…")
         let merged = dir.appendingPathComponent("merged.ts")
         FileManager.default.createFile(atPath: merged.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: merged)
-        defer { try? handle.close() }
-        for buf in buffers {
-            if let buf { try handle.write(contentsOf: Data(buf)) }
+        if let handle = try? FileHandle(forWritingTo: merged) {
+            for i in 0..<total {
+                let segURL = dir.appendingPathComponent(String(format: "seg_%04d.ts", i))
+                if let d = try? Data(contentsOf: segURL) { try? handle.write(contentsOf: d) }
+            }
+            try? handle.close()
         }
 
         // 6) 重新封装成 mp4。
