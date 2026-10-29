@@ -85,9 +85,14 @@ for (const f of files) {
     if (needsAppKit && !/import AppKit/.test(src)) {
       problems.push(`${rel}: 用了 AppKit 符号但没有 import AppKit`);
     }
-    const needsAVKit = /\b(AVPlayer|AVPlayerItem|AVURLAsset|VideoPlayer)\b/.test(code);
+    const needsAVKit = /\b(VideoPlayer|AVPlayerViewController)\b/.test(code);
     if (needsAVKit && !/import AVKit/.test(src)) {
       problems.push(`${rel}: 用了 AVKit 符号但没有 import AVKit`);
+    }
+    // AVPlayer / AVURLAsset / AVAssetExportSession 属于 AVFoundation，别和 AVKit 混
+    const needsAVF = /\b(AVPlayer|AVPlayerItem|AVURLAsset|AVAssetExportSession|CMTime)\b/.test(code);
+    if (needsAVF && !/import AVFoundation/.test(src) && !/import AVKit/.test(src)) {
+      problems.push(`${rel}: 用了 AVFoundation 符号但没有 import`);
     }
   }
 
