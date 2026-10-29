@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import AVFoundation
 
 // MARK: - 播放列表
 
@@ -292,7 +293,49 @@ public actor HLSDownloader {
         for buf in buffers {
             if let buf { try handle.write(contentsOf: Data(buf)) }
         }
+
+        // 6) 重新封装成 mp4。
+        //    为什么必须做：HLS 分片拼接出来的 .ts 里，每个分片都带自己的 SPS/PPS，
+        //    ffprobe 会看到「两条 h264 流」，AVPlayer 遇到这种文件常常只播第一条流的开头。
+        //    passthrough 封装不重编码，很快，纯粹重排容器。
+        onState?("重新封装为 mp4…")
+        let mp4 = dir.appendingPathComponent("video.mp4")
+        if (try? await remuxToMp4(merged, to: mp4)) != nil {
+            return mp4
+        }
+        // remux 失败就退回 ts（老的播放路径还能凑合）
         return merged
+    }
+
+    // MARK: - remux
+
+    /// 把 .ts 无损重新封装成 .mp4。不重编码，只换容器、合流。
+    public func remuxToMp4(_ source: URL, to destination: URL) async throws {
+        let asset = AVURLAsset(url: source)
+        guard let export = AVAssetExportSession(asset: asset,
+                                                presetName: AVAssetExportPresetPassthrough) else {
+            throw HLSError.badPlaylist("AVAssetExportSession 创建失败")
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try? FileManager.default.removeItem(at: destination)
+        }
+        export.outputURL = destination
+        export.outputFileType = .mp4
+        export.shouldOptimizeForNetworkUse = true
+        export.timeRange = CMTimeRange(start: .zero, duration: asset.duration)
+
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            export.exportAsynchronously {
+                switch export.status {
+                case .completed:
+                    cont.resume()
+                case .cancelled:
+                    cont.resume(throwing: HLSError.badPlaylist("remux 被取消"))
+                default:
+                    cont.resume(throwing: export.error ?? HLSError.badPlaylist("remux 失败"))
+                }
+            }
+        }
     }
 
     static func fetchSegment(_ session: URLSession, _ urlString: String, _ referer: String) async throws -> [UInt8] {
