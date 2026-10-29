@@ -229,6 +229,7 @@ final class AppStore: ObservableObject {
                 let produced = try await downloader.download(
                     playlist, to: dir,
                     referer: TxinEndpoint.base,
+                    skipRemux: true,          // 播 m3u8 不需要 mp4，省掉十几秒
                     onProgress: { p in
                         // 只在 1 片、每 5 片、最后一片时报一次，避免刷屏。
                         // 闭包是 @Sendable，不能捕获可变的计数变量，所以判据只看 p 本身。
