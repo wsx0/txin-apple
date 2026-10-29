@@ -179,28 +179,47 @@ final class AppStore: ObservableObject {
             return
         }
 
-        // 先探一下，能通就用。探测用的 URLSession 和 VLC 自己的请求路径不完全一样，
-        // 所以探不通不代表 VLC 播不了 —— 记住第一个候选，最后兜底交给 VLC 试。
-        var fallback: URL?
         var lastError = ""
 
         for link in links {
             guard let raw = link.m3u8_url else { continue }
             let full = raw.hasPrefix("http") ? raw : TxinEndpoint.current + raw
             guard let url = URL(string: full) else { continue }
-            if fallback == nil { fallback = url }
 
-            if await Self.probe(url) {
-                playURL = url
+            do {
+                // 1) 自己把 m3u8 拉下来 —— 播放器直接播远程的话，它请求的是 m3u8 里
+                //    写的 whk.srslpoh.cn，那个域名在国内被 DNS 劫持到 183.192.65.101，
+                //    返回 11545 字节 HTML（状态码还是 200），播放器当 TS 解码就卡死。
+                var req = URLRequest(url: url)
+                req.timeoutInterval = 15
+                req.setValue(TxinClient.userAgent, forHTTPHeaderField: "User-Agent")
+                req.setValue(TxinEndpoint.base, forHTTPHeaderField: "Referer")
+                let (data, resp) = try await URLSession.shared.data(for: req)
+
+                guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+                    lastError = "线路 \(link.name ?? "") HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)"
+                    continue
+                }
+                let text = String(decoding: data, as: UTF8.self)
+                guard text.contains("#EXTM3U") else {
+                    lastError = "线路 \(link.name ?? "") 返回的不是播放列表（可能被劫持）"
+                    continue
+                }
+
+                // 2) 把所有 URL 改写到镜像（key 和每个分片都会一起改）
+                let rewritten = TxinCDN.rewritePlaylist(text)
+
+                // 3) 落到临时文件，让 VLC 播本地播放列表
+                let local = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("txin-\(movie.id)-\(link.code ?? "l").m3u8")
+                try rewritten.write(to: local, atomically: true, encoding: .utf8)
+
+                playURL = local
                 return
+            } catch {
+                lastError = "线路 \(link.name ?? "") \(error.localizedDescription)"
+                continue
             }
-            lastError = "线路 \(link.name ?? "") 探测未通过"
-        }
-
-        // 全都没探通，仍然给 VLC 一次机会 —— 它的网络栈比我这条 URLSession 更能兜底
-        if let fallback {
-            playURL = fallback
-            return
         }
 
         errorText = lastError.isEmpty ? "没有可用线路" : lastError
