@@ -57,11 +57,9 @@ final class AppStore: ObservableObject {
 
     /// 正在播的标题，nil 表示没在播
     @Published var playingTitle: String?
-    /// 交给全屏播放器的 item
-    @Published var playerItem: AVPlayerItem?
+    /// 交给 VLC 的播放地址（VLC 自己带 referrer、自己解 AES-128）
+    @Published var playURL: URL?
 
-    /// 必须强引用：AVAssetResourceLoader 只持弱引用，loader 一释放播放就断
-    private var resLoader: TxinResourceLoader?
     private var playTask: Task<Void, Never>?
 
     private(set) var client: TxinClient?
@@ -161,7 +159,7 @@ final class AppStore: ObservableObject {
 
     // MARK: - 直接播放（点一下就看，不做任何下载）
 
-    /// 点卡片调它。拉 detail -> 取第一条线路 -> 走 resource loader 播放。
+    /// 点卡片调它。拉 detail -> 取第一条能通的线路 -> 交给 VLC。
     func play(_ movie: TxinMovieBrief) {
         playTask?.cancel()
         playTask = Task { [weak self] in
@@ -181,47 +179,41 @@ final class AppStore: ObservableObject {
             return
         }
 
-        // 两条线路的 hash 不同、走不同 CDN 节点，随便挑一条能通的
-        var lastError: String = ""
+        // 两条线路的 hash 不同、走不同 CDN 节点，挑一条能通的
+        var lastError = ""
         for link in links {
             guard let raw = link.m3u8_url else { continue }
             let full = raw.hasPrefix("http") ? raw : TxinEndpoint.current + raw
-            guard let url = URL(string: full),
-                  let proxied = TxinResourceLoader.encode(url) else { continue }
+            guard let url = URL(string: full) else { continue }
 
-            // 关键：AVURLAssetHTTPHeaderFieldsKey 只作用于主请求，
-            // HLS 的分片和 key 是 AVFoundation 自己发的，不带 Referer -> CDN 403 -> 只播几秒。
-            // resource loader 接管全部子请求，统一补 header。
-            let loader = TxinResourceLoader(referer: TxinEndpoint.base)
-            resLoader = loader
-
-            let asset = AVURLAsset(url: proxied)
-            asset.resourceLoader.setDelegate(loader, queue: DispatchQueue(label: "txin.resource-loader"))
-
-            // 先探一下这个 m3u8 能不能真的拿到（避免用户对着黑屏等）
-            let ok = await loader.probePlaylist(url)
-            guard ok else {
-                lastError = "线路 \(link.name ?? "") 拉不到播放列表"
-                continue
+            // 先确认这个 m3u8 真能拉到，别让用户对着黑屏等
+            if await Self.probe(url) {
+                playURL = url
+                return
             }
-
-            let item = AVPlayerItem(asset: asset)
-            item.preferredForwardBufferDuration = 30
-            item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
-            playerItem = item
-            return
+            lastError = "线路 \(link.name ?? "") 拉不到播放列表"
         }
 
         errorText = lastError.isEmpty ? "所有线路都打不开" : lastError
         playingTitle = nil
     }
 
+    /// 直接请求一次 m3u8，看是不是真的 #EXTM3U
+    private static func probe(_ url: URL) async -> Bool {
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 15
+        req.setValue(TxinClient.userAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue(TxinEndpoint.base, forHTTPHeaderField: "Referer")
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return false }
+        let head = String(decoding: data.prefix(64), as: UTF8.self)
+        return head.contains("#EXTM3U")
+    }
+
     func stopPlay() {
         playTask?.cancel()
-        playerItem = nil
+        playURL = nil
         playingTitle = nil
-        resLoader?.clearCache()
-        resLoader = nil
     }
 
     // MARK: 下载
