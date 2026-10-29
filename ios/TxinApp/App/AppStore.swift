@@ -6,6 +6,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import AVFoundation
 
 // MARK: - 下载任务（值类型，配合 @Published 数组）
 
@@ -51,6 +52,17 @@ final class AppStore: ObservableObject {
     @Published var jobs: [DownloadJob] = []
     @Published var statusText: String = "准备中…"
     @Published var errorText: String?
+
+    // MARK: 直接播放（点卡片即播，不下载）
+
+    /// 正在播的标题，nil 表示没在播
+    @Published var playingTitle: String?
+    /// 交给全屏播放器的 item
+    @Published var playerItem: AVPlayerItem?
+
+    /// 必须强引用：AVAssetResourceLoader 只持弱引用，loader 一释放播放就断
+    private var resLoader: TxinResourceLoader?
+    private var playTask: Task<Void, Never>?
 
     private(set) var client: TxinClient?
 
@@ -145,6 +157,71 @@ final class AppStore: ObservableObject {
         cdnDomesticOK = ok
         await TxinCDN.autoSelectMirror()
         statusText = ok ? "国内 CDN 可用" : "已切 CloudFront 镜像"
+    }
+
+    // MARK: - 直接播放（点一下就看，不做任何下载）
+
+    /// 点卡片调它。拉 detail -> 取第一条线路 -> 走 resource loader 播放。
+    func play(_ movie: TxinMovieBrief) {
+        playTask?.cancel()
+        playTask = Task { [weak self] in
+            guard let self else { return }
+            await self.startPlay(movie)
+        }
+    }
+
+    private func startPlay(_ movie: TxinMovieBrief) async {
+        playingTitle = movie.name ?? movie.id
+        errorText = nil
+
+        guard let detail = await movieDetail(id: movie.id),
+              let links = detail.play_links, !links.isEmpty else {
+            errorText = "这部片子拿不到播放地址"
+            playingTitle = nil
+            return
+        }
+
+        // 两条线路的 hash 不同、走不同 CDN 节点，随便挑一条能通的
+        var lastError: String = ""
+        for link in links {
+            guard let raw = link.m3u8_url else { continue }
+            let full = raw.hasPrefix("http") ? raw : TxinEndpoint.current + raw
+            guard let url = URL(string: full),
+                  let proxied = TxinResourceLoader.encode(url) else { continue }
+
+            // 关键：AVURLAssetHTTPHeaderFieldsKey 只作用于主请求，
+            // HLS 的分片和 key 是 AVFoundation 自己发的，不带 Referer -> CDN 403 -> 只播几秒。
+            // resource loader 接管全部子请求，统一补 header。
+            let loader = TxinResourceLoader(referer: TxinEndpoint.base)
+            resLoader = loader
+
+            let asset = AVURLAsset(url: proxied)
+            asset.resourceLoader.setDelegate(loader, queue: DispatchQueue(label: "txin.resource-loader"))
+
+            // 先探一下这个 m3u8 能不能真的拿到（避免用户对着黑屏等）
+            let ok = await loader.probePlaylist(url)
+            guard ok else {
+                lastError = "线路 \(link.name ?? "") 拉不到播放列表"
+                continue
+            }
+
+            let item = AVPlayerItem(asset: asset)
+            item.preferredForwardBufferDuration = 30
+            item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
+            playerItem = item
+            return
+        }
+
+        errorText = lastError.isEmpty ? "所有线路都打不开" : lastError
+        playingTitle = nil
+    }
+
+    func stopPlay() {
+        playTask?.cancel()
+        playerItem = nil
+        playingTitle = nil
+        resLoader?.clearCache()
+        resLoader = nil
     }
 
     // MARK: 下载
