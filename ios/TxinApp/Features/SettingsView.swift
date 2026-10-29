@@ -33,16 +33,21 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("存储") {
+                Section("播放内核") {
                     HStack {
-                        Text("下载目录")
+                        Text("引擎")
                         Spacer()
-                        Text("文件 App / 我的 iPhone / Txin / txin")
+                        Text("VLCKit 3.7.4 (libVLC + FFmpeg)")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.trailing)
                     }
-                    Text("下载完成的 .ts 可以在「文件」App 里长按导出，或在下载页点分享。要转 mp4 需要在电脑上跑 ffmpeg。")
+                    Text("""
+                    糖心的视频是「每个分片各带一套 PAT/PMT」的 HLS，\
+                    拼接后同一组 PID 会出现多套 program 声明。\
+                    AVFoundation 只认第一个 program（表现：播几秒就停），\
+                    FFmpeg 按 PES 时间戳重组，不受影响。
+                    """)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -70,7 +75,7 @@ struct SettingsView: View {
                         Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0")
                             .foregroundStyle(.secondary)
                     }
-                    Text("协议：AES-256-CBC + HMAC-SHA256 请求加密，HLS AES-128 分片解密。逆向自网站前端，仅作协议研究。")
+                    Text("协议：AES-256-CBC + HMAC-SHA256 请求加密；图片为 AES-128-ECB 加密的 .bnc；视频 HLS AES-128 交给 VLCKit 自行解密。")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
