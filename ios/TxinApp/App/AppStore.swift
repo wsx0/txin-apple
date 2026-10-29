@@ -170,18 +170,18 @@ final class AppStore: ObservableObject {
                 throw NSError(domain: "txin", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "拿不到播放地址"])
             }
-            let full = m3u8.hasPrefix("http") ? m3u8 : TxinClient.defaultHost + m3u8
+            let full = m3u8.hasPrefix("http") ? m3u8 : TxinEndpoint.current + m3u8
             update(idx) { $0.phase = .playlist }
 
             let dl = HLSDownloader(concurrency: 5)
-            let playlist = try await dl.fetchPlaylist(m3u8: full, referer: TxinClient.defaultHost + "/")
+            let playlist = try await dl.fetchPlaylist(m3u8: full, referer: TxinEndpoint.base)
             update(idx) { $0.total = playlist.segments.count; $0.phase = .downloading }
 
             let dir = downloadRoot.appendingPathComponent(id, isDirectory: true)
             let merged = try await dl.download(
                 playlist,
                 to: dir,
-                referer: TxinClient.defaultHost + "/",
+                referer: TxinEndpoint.base,
                 onProgress: { p in
                     Task { @MainActor in
                         self.update(idx) { $0.done = p.done; $0.bytes = p.bytes }
