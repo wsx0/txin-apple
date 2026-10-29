@@ -210,44 +210,48 @@ final class AppStore: ObservableObject {
             note("L\(idx + 1) \(link.code ?? "?") → \(URL(string: full)?.host ?? "?")")
 
             do {
-                let downloader = HLSDownloader(concurrency: 4)
+                let downloader = HLSDownloader(concurrency: 6)
                 let playlist = try await downloader.fetchPlaylist(m3u8: full,
                                                                   referer: TxinEndpoint.base)
                 note("m3u8 ok 片数=\(playlist.segments.count) key=\(playlist.key != nil ? "有" : "无")")
-                note("首片域 \(URL(string: playlist.segments[0])?.host ?? "?")")
 
                 let dir = cacheRoot.appendingPathComponent(movie.id, isDirectory: true)
                 let m3u8 = dir.appendingPathComponent("index.m3u8")
 
-                let task = Task.detached(priority: .userInitiated) {
-                    _ = try? await downloader.download(playlist, to: dir,
-                                                       referer: TxinEndpoint.base,
-                                                       onProgress: nil,
-                                                       onState: nil)
-                }
-                cacheTask = task
+                // 清掉上一轮的残留，否则 m3u8 里会混进旧分片
+                try? FileManager.default.removeItem(at: dir)
 
-                var ready = false
-                for tick in 0..<80 {
-                    let n = Self.segmentCount(dir) ?? 0
-                    if tick % 8 == 0 { note("已缓存 \(n)/\(playlist.segments.count) 片") }
-                    if n >= 2, FileManager.default.fileExists(atPath: m3u8.path) {
-                        ready = true
-                        break
-                    }
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                }
+                // 必须等整片下完再起播。
+                // 本地文件不是 HTTP 流，播放器不会重新读取更新后的 m3u8 ——
+                // 边下边播时 m3u8 只含已下载的分片，VLC 就认为片子只有那么长，
+                // 播到头就卡在「缓冲中」。
+                note("开始缓存 \(playlist.segments.count) 片")
+                let produced = try await downloader.download(
+                    playlist, to: dir,
+                    referer: TxinEndpoint.base,
+                    onProgress: { p in
+                        // 只在 1 片、每 5 片、最后一片时报一次，避免刷屏。
+                        // 闭包是 @Sendable，不能捕获可变的计数变量，所以判据只看 p 本身。
+                        let shout = p.done == 1 || p.done % 5 == 0 || p.done == p.total
+                        guard shout else { return }
+                        Task { @MainActor [done = p.done, total = p.total] in
+                            self.note("缓存 \(done)/\(total)")
+                        }
+                    },
+                    onState: nil)
 
-                if ready {
-                    if let first = Self.firstSegmentHead(dir) {
-                        note("首片首字节 \(first) \(first == "0x47" ? "✓明文TS" : "✗异常")")
-                    }
-                    note("起播 (本地)")
-                    playURL = m3u8
-                    return
+                let head = Self.firstSegmentHead(dir) ?? "?"
+                note("首片首字节 \(head) \(head == "0x47" ? "✓明文TS" : "✗异常")")
+                note("产物 \(produced.lastPathComponent)")
+
+                guard FileManager.default.fileExists(atPath: m3u8.path) else {
+                    note("index.m3u8 缺失")
+                    lastError = "线路 \(link.name ?? "") 没生成播放列表"
+                    continue
                 }
-                note("L\(idx + 1) 缓存超时")
-                lastError = "线路 \(link.name ?? "") 缓存超时"
+                note("起播 (本地完整)")
+                playURL = m3u8
+                return
             } catch {
                 note("L\(idx + 1) 失败 \(error.localizedDescription.prefix(40))")
                 lastError = "线路 \(link.name ?? "") \(error.localizedDescription)"
