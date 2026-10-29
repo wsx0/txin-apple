@@ -135,19 +135,7 @@ struct DetailPane: View {
             return p
         }()
 
-        // 0) 下载后已 remux 成 mp4 —— AVPlayer 对它支持最完整
-        if let p = donePath, (p as NSString).pathExtension.lowercased() == "mp4" {
-            if playingLine == "local" {
-                player?.pause(); player = nil; playingLine = nil
-                return
-            }
-            player = AVPlayer(url: URL(fileURLWithPath: p))
-            playingLine = "local"
-            player?.play()
-            return
-        }
-
-        // 1) 本地 HLS 播放列表优先 —— 裸 .ts 只播开头的问题是 AVPlayer 的老毛病
+        // 1) 本地 HLS 播放列表优先 —— 逐片解析，避开多 program TS 的坑
         if let p = donePath {
             let m3u8 = URL(fileURLWithPath: p).deletingLastPathComponent()
                 .appendingPathComponent("index.m3u8")
@@ -161,6 +149,18 @@ struct DetailPane: View {
                 player?.play()
                 return
             }
+        }
+
+        // 2) mp4（只有通过时长校验才会保留）
+        if let p = donePath, (p as NSString).pathExtension.lowercased() == "mp4" {
+            if playingLine == "local" {
+                player?.pause(); player = nil; playingLine = nil
+                return
+            }
+            player = AVPlayer(url: URL(fileURLWithPath: p))
+            playingLine = "local"
+            player?.play()
+            return
         }
 
         // 2) 只有整片 .ts 时退而求其次
