@@ -184,7 +184,7 @@ struct DiagnoseSheet: View {
                                 .font(.system(size: 11))
                             Text(m.verdict)
                                 .font(.system(size: 10))
-                                .foregroundStyle(m.ok ? .secondary : .orange)
+                                .foregroundStyle(m.ok ? Color.secondary : Color.orange)
                         }
                     }
                 }
