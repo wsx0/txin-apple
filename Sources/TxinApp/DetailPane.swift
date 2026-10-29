@@ -127,22 +127,42 @@ struct DetailPane: View {
     }
 
     private func play(line: TxinPlayLink) {
-        // 已下载优先：本地文件不受 CDN 带宽影响
-        // 注意 macOS 版的 DownloadJob 用的是 state（不是 iOS 那个 phase），也没有 job(for:)
-        if let job = store.jobs.first(where: { $0.id == d_id() }),
-           job.state == .done,
-           let path = job.filePath,
-           FileManager.default.fileExists(atPath: path) {
+        // macOS 版的 DownloadJob 用的是 state（不是 iOS 那个 phase），也没有 job(for:)
+        let job = store.jobs.first(where: { $0.id == d_id() })
+        let donePath: String? = {
+            guard let job, job.state == .done, let p = job.filePath,
+                  FileManager.default.fileExists(atPath: p) else { return nil }
+            return p
+        }()
+
+        // 1) 本地 HLS 播放列表优先 —— 裸 .ts 只播开头的问题是 AVPlayer 的老毛病
+        if let p = donePath {
+            let m3u8 = URL(fileURLWithPath: p).deletingLastPathComponent()
+                .appendingPathComponent("index.m3u8")
+            if FileManager.default.fileExists(atPath: m3u8.path) {
+                if playingLine == "local" {
+                    player?.pause(); player = nil; playingLine = nil
+                    return
+                }
+                player = AVPlayer(url: m3u8)
+                playingLine = "local"
+                player?.play()
+                return
+            }
+        }
+
+        // 2) 只有整片 .ts 时退而求其次
+        if let p = donePath {
             if playingLine == "local" {
                 player?.pause(); player = nil; playingLine = nil
                 return
             }
-            let asset = AVURLAsset(url: URL(fileURLWithPath: path),
+            let asset = AVURLAsset(url: URL(fileURLWithPath: p),
                                    options: ["AVURLAssetOutOfBandMIMETypeKey": "video/mp2t"])
-            let p = AVPlayer(playerItem: AVPlayerItem(asset: asset))
-            player = p
+            let pl = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+            player = pl
             playingLine = "local"
-            p.play()
+            pl.play()
             return
         }
 
