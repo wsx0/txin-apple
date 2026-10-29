@@ -171,7 +171,9 @@ final class AppStore: ObservableObject {
 
             let safe = title.replacingOccurrences(of: "/", with: "_")
                 .replacingOccurrences(of: ":", with: "_")
-            let final = dir.appendingPathComponent("\(id)_\(safe).ts")
+            // 保留真实扩展名：remux 成功是 .mp4，失败退回 .ts
+            let ext = merged.pathExtension.lowercased()
+            let final = dir.appendingPathComponent("\(id)_\(safe).\(ext.isEmpty ? "ts" : ext)")
             try? FileManager.default.removeItem(at: final)
             try FileManager.default.moveItem(at: merged, to: final)
 
