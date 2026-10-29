@@ -53,7 +53,7 @@ public final class TxinResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     }
 
     /// txin://media.local/api/... -> https://tangxgw.com/api/...
-    private func decode(_ url: URL) -> URL? {
+    fileprivate func decode(_ url: URL) -> URL? {
         var c = URLComponents(url: url, resolvingAgainstBaseURL: false)
         c?.scheme = "https"
         c?.host = URL(string: referer)?.host ?? "tangxgw.com"
@@ -161,5 +161,19 @@ public final class TxinResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         cacheLock.lock()
         cache.removeAll()
         cacheLock.unlock()
+    }
+
+    /// 播之前先确认这条线路真的能拉到播放列表（20 秒超时、2 次尝试）。
+    /// 用户不该对着黑屏干等 —— 拉不到就换下一条线路。
+    public func probePlaylist(_ proxied: URL) async -> Bool {
+        guard let target = decode(proxied) else { return false }
+        do {
+            let data = try await fetch(target, attempts: 2)
+            // 至少要像个 m3u8
+            let head = String(decoding: data.prefix(64), as: UTF8.self)
+            return head.contains("#EXTM3U")
+        } catch {
+            return false
+        }
     }
 }
