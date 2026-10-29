@@ -61,19 +61,9 @@ struct DetailView: View {
     // MARK: 组件
 
     private var poster: some View {
-        AsyncImage(url: movie.coverURL) { phase in
-            switch phase {
-            case .success(let img):
-                img.resizable().aspectRatio(contentMode: .fit)
-            case .failure:
-                Rectangle().fill(.quaternary)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .overlay(Image(systemName: "film").font(.largeTitle).foregroundStyle(.tertiary))
-            default:
-                Rectangle().fill(.quaternary)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .overlay(ProgressView())
-            }
+        RemoteImage(url: movie.img, contentMode: .fit) {
+            ImagePlaceholder(icon: "film")
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
         }
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .padding(.top, 8)
