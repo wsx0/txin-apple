@@ -309,33 +309,80 @@ public actor HLSDownloader {
 
     // MARK: - remux
 
-    /// 把 .ts 无损重新封装成 .mp4。不重编码，只换容器、合流。
+    /// 把 .ts 无损重新封装成 .mp4。
+    ///
+    /// 为什么不能直接拿整片 export：分片拼接出来的 TS 里有**多套 PAT/PMT program 声明**
+    /// （每个分片自带一份），`AVAssetExportSession` 直接吃这种 asset 时，
+    /// 往往"成功"导出但只有第一个 program —— 也就是开头几秒。
+    /// 所以先建一个 AVMutableComposition，只取第一路视频和第一路音频，
+    /// 等价于 ffmpeg 的 `-map 0:v:0 -map 0:a:0`。
     public func remuxToMp4(_ source: URL, to destination: URL) async throws {
         let asset = AVURLAsset(url: source)
-        guard let export = AVAssetExportSession(asset: asset,
-                                                presetName: AVAssetExportPresetPassthrough) else {
-            throw HLSError.badPlaylist("AVAssetExportSession 创建失败")
+        let fullRange = CMTimeRange(start: .zero, duration: try await asset.load(.duration))
+
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        guard let firstVideo = videoTracks.first else {
+            throw HLSError.badPlaylist("源文件里没有视频轨")
         }
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+
+        let composition = AVMutableComposition()
+        guard let vTrack = composition.addMutableTrack(withMediaType: .video,
+                                                       preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw HLSError.badPlaylist("无法创建视频轨")
+        }
+        try vTrack.insertTimeRange(fullRange, of: firstVideo, at: .zero)
+
+        if let a = audioTracks.first,
+           let aTrack = composition.addMutableTrack(withMediaType: .audio,
+                                                    preferredTrackID: kCMPersistentTrackID_Invalid) {
+            try? aTrack.insertTimeRange(fullRange, of: a, at: .zero)
+        }
+
         if FileManager.default.fileExists(atPath: destination.path) {
             try? FileManager.default.removeItem(at: destination)
         }
-        export.outputURL = destination
-        export.outputFileType = .mp4
-        export.shouldOptimizeForNetworkUse = true
-        export.timeRange = CMTimeRange(start: .zero, duration: asset.duration)
 
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            export.exportAsynchronously {
-                switch export.status {
-                case .completed:
-                    cont.resume()
-                case .cancelled:
-                    cont.resume(throwing: HLSError.badPlaylist("remux 被取消"))
-                default:
-                    cont.resume(throwing: export.error ?? HLSError.badPlaylist("remux 失败"))
+        // 先试 passthrough（快、不重编码）；失败或时长明显不对就重编码
+        let presets = [AVAssetExportPresetPassthrough, AVAssetExportPresetHighestQuality]
+        var lastError: Error?
+
+        for preset in presets {
+            guard let export = AVAssetExportSession(asset: composition, presetName: preset) else {
+                continue
+            }
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try? FileManager.default.removeItem(at: destination)
+            }
+            export.outputURL = destination
+            export.outputFileType = .mp4
+            export.shouldOptimizeForNetworkUse = true
+            export.timeRange = fullRange
+
+            do {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                    export.exportAsynchronously {
+                        switch export.status {
+                        case .completed: cont.resume()
+                        case .cancelled: cont.resume(throwing: HLSError.badPlaylist("remux 被取消"))
+                        default: cont.resume(throwing: export.error ?? HLSError.badPlaylist("remux 失败"))
+                        }
+                    }
                 }
+                // 关键校验：导出结果的时长必须接近源，否则就是被截断了
+                let outAsset = AVURLAsset(url: destination)
+                let outDur = try await outAsset.load(.duration).seconds
+                let srcDur = fullRange.duration.seconds
+                if srcDur > 0, outDur >= srcDur * 0.95 {
+                    return
+                }
+                lastError = HLSError.badPlaylist(
+                    "remux 结果只有 \(String(format: "%.1f", outDur))s / 源 \(String(format: "%.1f", srcDur))s，判定截断")
+            } catch {
+                lastError = error
             }
         }
+        throw lastError ?? HLSError.badPlaylist("remux 全部预设失败")
     }
 
     static func fetchSegment(_ session: URLSession, _ urlString: String, _ referer: String) async throws -> [UInt8] {
