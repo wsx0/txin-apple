@@ -178,7 +178,7 @@ final class AppStore: ObservableObject {
             update(idx) { $0.total = playlist.segments.count; $0.phase = .downloading }
 
             let dir = downloadRoot.appendingPathComponent(id, isDirectory: true)
-            let merged = try await dl.download(
+            let produced = try await dl.download(
                 playlist,
                 to: dir,
                 referer: TxinEndpoint.base,
@@ -194,9 +194,12 @@ final class AppStore: ObservableObject {
             update(idx) { $0.phase = .merging }
             let safe = title.replacingOccurrences(of: "/", with: "_")
                 .replacingOccurrences(of: ":", with: "_")
-            let final = dir.appendingPathComponent("\(id)_\(safe).ts")
+            // 保留真实扩展名：remux 成功是 .mp4，失败退回 .ts。
+            // 之前这里硬写成 .ts，mp4 被贴上 .ts 后缀，播放器按 TS 解析必然出问题。
+            let ext = produced.pathExtension.lowercased()
+            let final = dir.appendingPathComponent("\(id)_\(safe).\(ext.isEmpty ? "ts" : ext)")
             try? FileManager.default.removeItem(at: final)
-            try FileManager.default.moveItem(at: merged, to: final)
+            try FileManager.default.moveItem(at: produced, to: final)
 
             let size = (try? FileManager.default
                 .attributesOfItem(atPath: final.path)[.size] as? Int64) ?? 0
@@ -204,7 +207,7 @@ final class AppStore: ObservableObject {
                 $0.phase = .done
                 $0.filePath = final.path
                 $0.bytes = size
-                $0.note = ""
+                $0.note = ext == "mp4" ? "已封装为 mp4" : "已合并为 ts"
             }
             statusText = "已保存 \(final.lastPathComponent)"
         } catch {
