@@ -194,7 +194,19 @@ struct DetailView: View {
     }
 
     private func play(line: TxinPlayLink) {
-        // 1) 本地 HLS 播放列表：AVPlayer 原生支持，按分片播，不会只播开头
+        // 1) 下载后已 remux 成 mp4 —— AVPlayer 对 mp4 支持最完整，直接播
+        if let f = localFile, f.pathExtension.lowercased() == "mp4" {
+            if playingLine == "local" {
+                player?.pause(); player = nil; playingLine = nil
+                return
+            }
+            player = AVPlayer(url: f)
+            playingLine = "local"
+            player?.play()
+            return
+        }
+
+        // 2) 本地 HLS 播放列表：AVPlayer 原生支持，按分片播，不会只播开头
         if let pl = localPlaylist {
             if playingLine == "local" {
                 player?.pause(); player = nil; playingLine = nil
@@ -206,7 +218,7 @@ struct DetailView: View {
             return
         }
 
-        // 2) 有整片 .ts 但没有 m3u8（老版本下载的），尽量播
+        // 3) 有整片 .ts 但没有 m3u8（老版本下载的），尽量播
         if let local = localFile {
             if playingLine == "local" {
                 player?.pause(); player = nil; playingLine = nil
